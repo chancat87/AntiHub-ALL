@@ -8,6 +8,8 @@ import uuid
 import secrets
 
 from passlib.context import CryptContext
+from passlib.exc import UnknownHashError
+import bcrypt
 import jwt
 from jwt.exceptions import InvalidTokenError, ExpiredSignatureError
 
@@ -17,13 +19,17 @@ from app.core.config import get_settings
 # ==================== 密码哈希配置 ====================
 
 # 配置密码哈希算法
-# 使用 bcrypt_sha256 避免 bcrypt 72 bytes 密码长度限制；同时保留 bcrypt 以兼容历史哈希
+# 说明：
+# - `bcrypt` 5.x 与 `passlib` 1.7.4 存在兼容性问题（passlib 在自检时会触发 bcrypt 的 72 bytes 限制并直接抛异常）
+# - 为避免启动/初始化阶段直接崩溃，这里默认使用 `pbkdf2_sha256`（无需依赖 bcrypt 后端）
+# - 仍兼容校验历史 bcrypt 哈希（$2a$/$2b$/$2y$），使用 `bcrypt` 库直接校验并对超长输入按 bcrypt 语义截断到 72 bytes
 pwd_context = CryptContext(
-    schemes=["bcrypt_sha256", "bcrypt"],
+    schemes=["pbkdf2_sha256"],
     deprecated="auto",
-    bcrypt_sha256__rounds=12,
-    bcrypt__rounds=12,
+    pbkdf2_sha256__rounds=29000,
 )
+
+BCRYPT_HASH_PREFIXES = ("$2a$", "$2b$", "$2y$", "$2x$")
 
 
 def hash_password(password: str) -> str:
@@ -39,6 +45,20 @@ def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
 
+def _bcrypt_verify_password(plain_password: str, hashed_password: str) -> bool:
+    """
+    使用 `bcrypt` 库直接验证 bcrypt 哈希，避免 passlib 的 bcrypt 后端兼容性问题。
+    """
+    try:
+        password_bytes = plain_password.encode("utf-8")
+        # bcrypt 只使用前 72 bytes；bcrypt 5.x 会对超长输入抛 ValueError，因此按算法语义截断
+        if len(password_bytes) > 72:
+            password_bytes = password_bytes[:72]
+        return bcrypt.checkpw(password_bytes, hashed_password.encode("utf-8"))
+    except Exception:
+        return False
+
+
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """
     验证密码
@@ -50,7 +70,17 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     Returns:
         密码正确返回 True,否则返回 False
     """
-    return pwd_context.verify(plain_password, hashed_password)
+    if not hashed_password:
+        return False
+
+    hashed_password = hashed_password.strip()
+    if hashed_password.startswith(BCRYPT_HASH_PREFIXES):
+        return _bcrypt_verify_password(plain_password, hashed_password)
+
+    try:
+        return pwd_context.verify(plain_password, hashed_password)
+    except UnknownHashError:
+        return False
 
 
 # ==================== JWT 令牌管理 ====================
