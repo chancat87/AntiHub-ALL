@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.security import hash_password
 from app.repositories.user_repository import UserRepository
+from app.cache import get_redis_client
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,23 @@ async def ensure_admin_user(db: AsyncSession) -> bool:
         await db.commit()
 
         logger.info("管理员账号创建成功: %s (ID: %s)", user.username, user.id)
+
+        # 自动创建 plug-in-api 账号并绑定
+        try:
+            from app.services.plugin_api_service import PluginAPIService
+            redis = get_redis_client()
+            plugin_service = PluginAPIService(db, redis)
+
+            result = await plugin_service.auto_create_and_bind_plugin_user(
+                user_id=user.id,
+                username=user.username,
+                prefer_shared=0  # 默认专属优先
+            )
+            logger.info("管理员 plug-in API 密钥创建成功: plugin_user_id=%s", result.plugin_user_id)
+        except Exception as e:
+            # 记录错误但不影响管理员创建
+            logger.warning("管理员 plug-in API 密钥创建失败（不影响管理员账号使用）: %s", str(e))
+
         return True
 
     except IntegrityError:
