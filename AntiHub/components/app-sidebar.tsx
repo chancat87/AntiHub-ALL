@@ -31,7 +31,7 @@ const data = {
   },
   navMain: [
     {
-      title: "我的仪表板",
+      title: "Antigravity + Kiro",
       url: "/dashboard",
       icon: IconDashboard,
     },

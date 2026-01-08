@@ -4,7 +4,6 @@ import { useEffect, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { SectionCards } from "@/components/section-cards"
 import { QuotaTrendChart } from "@/components/quota-trend-chart"
-import { SharedPoolModels } from "@/components/shared-pool-models"
 import { MorphingSquare } from '@/components/ui/morphing-square';
 
 function DashboardContent() {
@@ -27,11 +26,6 @@ function DashboardContent() {
       {/* 配额消耗趋势图表 */}
       <div className="px-4 lg:px-6">
         <QuotaTrendChart />
-      </div>
-
-      {/* 共享池模型配额数据 */}
-      <div className="px-4 lg:px-6">
-        <SharedPoolModels />
       </div>
     </div>
   )

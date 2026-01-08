@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts"
-import { getQuotaConsumption, type QuotaConsumption } from "@/lib/api"
+import { getQuotaConsumption, type QuotaConsumption, getKiroAccounts, getKiroAccountConsumption, type KiroConsumptionLog } from "@/lib/api"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
   Card,
@@ -27,20 +27,20 @@ import {
 } from "@/components/ui/select"
 
 const chartConfig = {
-  quota_consumed: {
-    label: "配额消耗",
+  antigravity: {
+    label: "Antigravity 配额消耗",
     color: "hsl(var(--chart-1))",
   },
-  count: {
-    label: "调用次数",
+  kiro: {
+    label: "Kiro 配额消耗",
     color: "hsl(var(--chart-2))",
   },
 } satisfies ChartConfig
 
 interface TrendDataPoint {
   time: string;
-  quota_consumed: number;
-  count: number;
+  antigravity: number;
+  kiro: number;
 }
 
 export function QuotaTrendChart() {
@@ -57,24 +57,50 @@ export function QuotaTrendChart() {
         const hours = parseInt(timeRange)
         const now = new Date()
         const startTime = new Date(now.getTime() - hours * 60 * 60 * 1000)
-        
-        // 获取消耗记录
-        const consumptionData = await getQuotaConsumption({
+
+        // 获取 Antigravity 消耗记录
+        const antigravityData = await getQuotaConsumption({
           limit: 1000,
           start_date: startTime.toISOString(),
           end_date: now.toISOString()
         })
 
+        // 获取 Kiro 消耗记录
+        let kiroData: KiroConsumptionLog[] = []
+        try {
+          const kiroAccounts = await getKiroAccounts()
+          // 获取所有 Kiro 账号的消费记录
+          const kiroPromises = kiroAccounts.map(account =>
+            getKiroAccountConsumption(account.account_id, {
+              limit: 1000,
+              start_date: startTime.toISOString(),
+              end_date: now.toISOString()
+            }).then(result => result.logs)
+          )
+          const allLogs = await Promise.all(kiroPromises)
+          kiroData = allLogs.flat()
+        } catch (err) {
+          console.warn('加载 Kiro 数据失败，仅显示 Antigravity 数据', err)
+        }
+
         // 按小时聚合数据
-        const hourlyData = new Map<string, { quota: number; count: number }>()
-        
-        consumptionData.forEach(record => {
+        const hourlyData = new Map<string, { antigravity: number; kiro: number }>()
+
+        // 聚合 Antigravity 数据
+        antigravityData.forEach(record => {
           const date = new Date(record.consumed_at)
           const hourKey = new Date(date.getFullYear(), date.getMonth(), date.getDate(), date.getHours()).toISOString()
-          
-          const existing = hourlyData.get(hourKey) || { quota: 0, count: 0 }
-          existing.quota += parseFloat(record.quota_consumed)
-          existing.count += 1
+          const existing = hourlyData.get(hourKey) || { antigravity: 0, kiro: 0 }
+          existing.antigravity += parseFloat(record.quota_consumed)
+          hourlyData.set(hourKey, existing)
+        })
+
+        // 聚合 Kiro 数据
+        kiroData.forEach(record => {
+          const date = new Date(record.consumed_at)
+          const hourKey = new Date(date.getFullYear(), date.getMonth(), date.getDate(), date.getHours()).toISOString()
+          const existing = hourlyData.get(hourKey) || { antigravity: 0, kiro: 0 }
+          existing.kiro += record.credit_used
           hourlyData.set(hourKey, existing)
         })
 
@@ -83,12 +109,12 @@ export function QuotaTrendChart() {
         for (let i = 0; i < hours; i++) {
           const time = new Date(now.getTime() - (hours - i) * 60 * 60 * 1000)
           const hourKey = new Date(time.getFullYear(), time.getMonth(), time.getDate(), time.getHours()).toISOString()
-          const data = hourlyData.get(hourKey) || { quota: 0, count: 0 }
-          
+          const data = hourlyData.get(hourKey) || { antigravity: 0, kiro: 0 }
+
           chartData.push({
             time: hourKey,
-            quota_consumed: data.quota,
-            count: data.count
+            antigravity: data.antigravity,
+            kiro: data.kiro
           })
         }
 
@@ -165,27 +191,27 @@ export function QuotaTrendChart() {
         >
           <AreaChart data={data}>
             <defs>
-              <linearGradient id="fillQuota" x1="0" y1="0" x2="0" y2="1">
+              <linearGradient id="fillAntigravity" x1="0" y1="0" x2="0" y2="1">
                 <stop
                   offset="5%"
-                  stopColor="var(--color-quota_consumed)"
+                  stopColor="var(--color-antigravity)"
                   stopOpacity={0.8}
                 />
                 <stop
                   offset="95%"
-                  stopColor="var(--color-quota_consumed)"
+                  stopColor="var(--color-antigravity)"
                   stopOpacity={0.1}
                 />
               </linearGradient>
-              <linearGradient id="fillCount" x1="0" y1="0" x2="0" y2="1">
+              <linearGradient id="fillKiro" x1="0" y1="0" x2="0" y2="1">
                 <stop
                   offset="5%"
-                  stopColor="var(--color-count)"
+                  stopColor="var(--color-kiro)"
                   stopOpacity={0.8}
                 />
                 <stop
                   offset="95%"
-                  stopColor="var(--color-count)"
+                  stopColor="var(--color-kiro)"
                   stopOpacity={0.1}
                 />
               </linearGradient>
@@ -229,17 +255,17 @@ export function QuotaTrendChart() {
               }
             />
             <Area
-              dataKey="quota_consumed"
+              dataKey="antigravity"
               type="monotone"
-              fill="url(#fillQuota)"
-              stroke="var(--color-quota_consumed)"
+              fill="url(#fillAntigravity)"
+              stroke="var(--color-antigravity)"
               strokeWidth={2}
             />
             <Area
-              dataKey="count"
+              dataKey="kiro"
               type="monotone"
-              fill="url(#fillCount)"
-              stroke="var(--color-count)"
+              fill="url(#fillKiro)"
+              stroke="var(--color-kiro)"
               strokeWidth={2}
             />
           </AreaChart>

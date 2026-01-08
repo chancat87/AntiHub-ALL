@@ -12,17 +12,32 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
-import { getSharedPoolStats, getQuotaConsumption, getSharedPoolQuotas, type SharedPoolStats, type UserConsumption } from "@/lib/api"
+import {
+  getSharedPoolStats,
+  getQuotaConsumption,
+  getSharedPoolQuotas,
+  getKiroAccounts,
+  getKiroConsumptionStats,
+  type SharedPoolStats,
+  type UserConsumption,
+  type KiroConsumptionStats
+} from "@/lib/api"
 
 interface ComputedStats {
-  totalAccounts: number;
-  activeAccounts: number;
+  totalAccounts: number; // Antigravity + Kiro 总账号数
+  activeAccounts: number; // Antigravity 活跃账号数
+  totalKiroAccounts: number; // Kiro 总账号数
+  activeKiroAccounts: number; // Kiro 活跃账号数
   totalModels: number;
   availableModels: number;
-  consumedLast24h: number;
-  callsLast24h: number;
-  totalRequests: number;
-  totalQuotaConsumed: number;
+  consumedLast24h: number; // Antigravity 24小时消耗
+  kiroConsumedLast24h: number; // Kiro 24小时消耗
+  callsLast24h: number; // Antigravity 24小时调用
+  kiroCallsLast24h: number; // Kiro 24小时调用
+  totalRequests: number; // Antigravity 总调用
+  totalQuotaConsumed: number; // Antigravity 总消耗
+  totalKiroRequests: number; // Kiro 总调用
+  totalKiroQuotaConsumed: number; // Kiro 总消耗
 }
 
 export function SectionCards() {
@@ -56,15 +71,43 @@ export function SectionCards() {
         // 获取用户总消费统计
         const userConsumption = sharedPoolData.user_consumption;
 
+        // 获取 Kiro 数据
+        let kiroAccounts: any[] = [];
+        let kiroStats: KiroConsumptionStats | null = null;
+        let kiroConsumedLast24h = 0;
+        let kiroCallsLast24h = 0;
+
+        try {
+          // 获取 Kiro 账号
+          kiroAccounts = await getKiroAccounts();
+
+          // 获取 Kiro 消费统计
+          kiroStats = await getKiroConsumptionStats();
+        } catch (err) {
+          console.warn('加载 Kiro 数据失败，仅显示 Antigravity 数据', err);
+        }
+
+        // 计算 Kiro 24小时数据
+        if (kiroStats) {
+          kiroConsumedLast24h = parseFloat(kiroStats.total_credit);
+          kiroCallsLast24h = parseInt(kiroStats.total_requests);
+        }
+
         setStats({
-          totalAccounts: poolStats.accounts.total_shared,
+          totalAccounts: poolStats.accounts.total_shared + kiroAccounts.length,
           activeAccounts: poolStats.accounts.active_shared,
+          totalKiroAccounts: kiroAccounts.length,
+          activeKiroAccounts: kiroAccounts.filter(a => a.status === 1).length,
           totalModels,
           availableModels,
           consumedLast24h,
+          kiroConsumedLast24h,
           callsLast24h,
+          kiroCallsLast24h,
           totalRequests: userConsumption?.total_requests || 0,
-          totalQuotaConsumed: userConsumption?.total_quota_consumed || 0
+          totalQuotaConsumed: userConsumption?.total_quota_consumed || 0,
+          totalKiroRequests: kiroStats ? parseInt(kiroStats.total_requests) : 0,
+          totalKiroQuotaConsumed: kiroStats ? parseFloat(kiroStats.total_credit) : 0
         });
       } catch (err) {
         setError(err instanceof Error ? err.message : '加载数据失败');
@@ -116,7 +159,7 @@ export function SectionCards() {
     <div className="*:data-[slot=card]:from-primary/5 *:data-[slot=card]:to-card dark:*:data-[slot=card]:bg-card grid grid-cols-1 gap-4 px-4 *:data-[slot=card]:bg-gradient-to-t *:data-[slot=card]:shadow-xs lg:px-6 @xl/main:grid-cols-2 @5xl/main:grid-cols-4">
       <Card className="@container/card">
         <CardHeader>
-          <CardDescription>共享账号总数</CardDescription>
+          <CardDescription>账户总数</CardDescription>
           <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
             {stats?.totalAccounts || 0}
           </CardTitle>
@@ -128,10 +171,10 @@ export function SectionCards() {
         </CardHeader>
         <CardFooter className="flex-col items-start gap-1.5 text-sm">
           <div className="line-clamp-1 flex gap-2 font-medium">
-            共享池账号总数
+            Antigravity {stats?.totalAccounts - (stats?.totalKiroAccounts || 0)} | Kiro {stats?.totalKiroAccounts || 0}
           </div>
           <div className="text-muted-foreground">
-            所有共享账号
+            双渠道账户合计
           </div>
         </CardFooter>
       </Card>
@@ -139,7 +182,7 @@ export function SectionCards() {
         <CardHeader>
           <CardDescription>活跃账号数</CardDescription>
           <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-            {stats?.activeAccounts || 0}
+            {(stats?.activeAccounts || 0) + (stats?.activeKiroAccounts || 0)}
           </CardTitle>
           <CardAction>
             <Badge variant="outline">
@@ -149,10 +192,10 @@ export function SectionCards() {
         </CardHeader>
         <CardFooter className="flex-col items-start gap-1.5 text-sm">
           <div className="line-clamp-1 flex gap-2 font-medium">
-            活跃率 {accountAvailabilityRate}%
+            Antigravity {stats?.activeAccounts || 0} | Kiro {stats?.activeKiroAccounts || 0}
           </div>
           <div className="text-muted-foreground">
-            当前活跃的账号
+            双渠道活跃账号
           </div>
         </CardFooter>
       </Card>
@@ -160,7 +203,7 @@ export function SectionCards() {
         <CardHeader>
           <CardDescription>24小时配额消耗</CardDescription>
           <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-            {stats?.consumedLast24h.toFixed(2) || '0.00'}
+            {((stats?.consumedLast24h || 0) + (stats?.kiroConsumedLast24h || 0)).toFixed(2)}
           </CardTitle>
           <CardAction>
             <Badge variant="outline">
@@ -170,16 +213,16 @@ export function SectionCards() {
         </CardHeader>
         <CardFooter className="flex-col items-start gap-1.5 text-sm">
           <div className="line-clamp-1 flex gap-2 font-medium">
-            总消耗: {stats?.totalQuotaConsumed?.toFixed(2) || '0.00'}
+            总消耗: {((stats?.totalQuotaConsumed || 0) + (stats?.totalKiroQuotaConsumed || 0)).toFixed(2)}
           </div>
-          <div className="text-muted-foreground">Antigravity 配额消耗</div>
+          <div className="text-muted-foreground">Antigravity + Kiro 配额消耗</div>
         </CardFooter>
       </Card>
       <Card className="@container/card">
         <CardHeader>
           <CardDescription>24小时调用量</CardDescription>
           <CardTitle className="text-2xl font-semibold tabular-nums @[250px]/card:text-3xl">
-            {stats?.callsLast24h?.toLocaleString() || '0'}
+            {((stats?.callsLast24h || 0) + (stats?.kiroCallsLast24h || 0)).toLocaleString()}
           </CardTitle>
           <CardAction>
             <Badge variant="outline">
@@ -189,9 +232,9 @@ export function SectionCards() {
         </CardHeader>
         <CardFooter className="flex-col items-start gap-1.5 text-sm">
           <div className="line-clamp-1 flex gap-2 font-medium">
-            总调用: {stats?.totalRequests?.toLocaleString() || '0'} 次
+            总调用: {((stats?.totalRequests || 0) + (stats?.totalKiroRequests || 0)).toLocaleString()} 次
           </div>
-          <div className="text-muted-foreground">Antigravity API 调用</div>
+          <div className="text-muted-foreground">Antigravity + Kiro API 调用</div>
         </CardFooter>
       </Card>
     </div>
