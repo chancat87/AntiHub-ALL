@@ -15,7 +15,6 @@ import {
   updateKiroAccountStatus,
   updateKiroAccountName,
   getKiroAccountBalance,
-  getCurrentUser,
   type Account,
   type AntigravityAccountDetail,
   type KiroAccount
@@ -61,14 +60,12 @@ import {
 } from '@/components/ui/select';
 import { MorphingSquare } from '@/components/ui/morphing-square';
 import { Gemini, Claude, OpenAI } from '@lobehub/icons';
-import { Badge as Badge1 } from '@/components/ui/badge-1';
 
 export default function AccountsPage() {
   const toasterRef = useRef<ToasterRef>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [kiroAccounts, setKiroAccounts] = useState<KiroAccount[]>([]);
   const [kiroBalances, setKiroBalances] = useState<Record<string, number>>({});
-  const [hasBeta, setHasBeta] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [activeTab, setActiveTab] = useState<'antigravity' | 'kiro'>('antigravity');
@@ -129,33 +126,29 @@ export default function AccountsPage() {
         setAccounts([]);
       }
 
-      // 检查Beta权限并加载Kiro账号
+      // 加载 Kiro 账号
       try {
-        const user = await getCurrentUser();
-        setHasBeta(user.beta === 1);
+        const kiroData = await getKiroAccounts();
+        setKiroAccounts(kiroData);
 
-        if (user.beta === 1) {
-          const kiroData = await getKiroAccounts();
-          setKiroAccounts(kiroData);
-
-          // 加载每个Kiro账号的余额
-          const balances: Record<string, number> = {};
-          await Promise.all(
-            kiroData.map(async (account) => {
-              try {
-                const balanceData = await getKiroAccountBalance(account.account_id);
-                balances[account.account_id] = balanceData.balance.available || 0;
-              } catch (err) {
-                console.error(`加载账号${account.account_id}余额失败:`, err);
-                balances[account.account_id] = 0;
-              }
-            })
-          );
-          setKiroBalances(balances);
-        }
+        // 加载每个Kiro账号的余额
+        const balances: Record<string, number> = {};
+        await Promise.all(
+          kiroData.map(async (account) => {
+            try {
+              const balanceData = await getKiroAccountBalance(account.account_id);
+              balances[account.account_id] = balanceData.balance.available || 0;
+            } catch (err) {
+              console.error(`加载账号${account.account_id}余额失败:`, err);
+              balances[account.account_id] = 0;
+            }
+          })
+        );
+        setKiroBalances(balances);
       } catch (err) {
         console.log('未加载Kiro账号');
         setKiroAccounts([]);
+        setKiroBalances({});
       }
     } catch (err) {
       toasterRef.current?.show({
@@ -633,45 +626,37 @@ export default function AccountsPage() {
           <div></div>
           <div className="flex gap-2">
             {/* 账号配置切换下拉菜单 */}
-            {hasBeta && (
-              <Select value={activeTab} onValueChange={(value: 'antigravity' | 'kiro') => setActiveTab(value)}>
-                <SelectTrigger className="w-[160px] h-9">
-                  <SelectValue>
-                    {activeTab === 'antigravity' ? (
-                      <span className="flex items-center gap-2">
-                        <img src="/antigravity-logo.png" alt="" className="size-4 rounded" />
-                        Antigravity
-                      </span>
-                    ) : (
-                      <span className="flex items-center gap-2">
-                        <img src="/kiro.png" alt="" className="size-4 rounded" />
-                        Kiro
-                        <Badge1 variant="turbo">
-                          Beta
-                        </Badge1>
-                      </span>
-                    )}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="antigravity">
+            <Select value={activeTab} onValueChange={(value: 'antigravity' | 'kiro') => setActiveTab(value)}>
+              <SelectTrigger className="w-[160px] h-9">
+                <SelectValue>
+                  {activeTab === 'antigravity' ? (
                     <span className="flex items-center gap-2">
                       <img src="/antigravity-logo.png" alt="" className="size-4 rounded" />
                       Antigravity
                     </span>
-                  </SelectItem>
-                  <SelectItem value="kiro">
+                  ) : (
                     <span className="flex items-center gap-2">
                       <img src="/kiro.png" alt="" className="size-4 rounded" />
                       Kiro
-                      <Badge1 variant="turbo">
-                        Beta
-                      </Badge1>
                     </span>
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            )}
+                  )}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="antigravity">
+                  <span className="flex items-center gap-2">
+                    <img src="/antigravity-logo.png" alt="" className="size-4 rounded" />
+                    Antigravity
+                  </span>
+                </SelectItem>
+                <SelectItem value="kiro">
+                  <span className="flex items-center gap-2">
+                    <img src="/kiro.png" alt="" className="size-4 rounded" />
+                    Kiro
+                  </span>
+                </SelectItem>
+              </SelectContent>
+            </Select>
             <Button
               variant="outline"
               size="default"
@@ -834,13 +819,10 @@ export default function AccountsPage() {
         )}
 
         {/* Kiro账号列表 */}
-        {activeTab === 'kiro' && hasBeta && (
+        {activeTab === 'kiro' && (
           <Card>
             <CardHeader className="text-left">
-              <CardTitle className="text-left flex items-center gap-2">
-                Kiro账号
-                <Badge1 variant="turbo">Beta</Badge1>
-              </CardTitle>
+              <CardTitle className="text-left">Kiro账号</CardTitle>
               <CardDescription className="text-left">
                 共 {kiroAccounts.length} 个账号
               </CardDescription>

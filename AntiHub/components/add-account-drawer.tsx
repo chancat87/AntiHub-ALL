@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
-import { createKiroAccount, getOAuthAuthorizeUrl, submitOAuthCallback, getKiroOAuthAuthorizeUrl, getCurrentUser, pollKiroOAuthStatus, importAccountByRefreshToken } from '@/lib/api';
+import { createKiroAccount, getOAuthAuthorizeUrl, submitOAuthCallback, getKiroOAuthAuthorizeUrl, pollKiroOAuthStatus, importAccountByRefreshToken } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Button as StatefulButton } from '@/components/ui/stateful-button';
 import { Input } from '@/components/ui/input';
@@ -16,7 +16,6 @@ import {
 } from '@/components/ui/drawer';
 import { IconExternalLink, IconCopy, IconX } from '@tabler/icons-react';
 import { Badge } from '@/components/ui/badge';
-import { Badge as Badge1 } from '@/components/ui/badge-1';
 import { cn } from '@/lib/utils';
 import Toaster, { ToasterRef } from '@/components/ui/toast';
 
@@ -30,10 +29,9 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
   const toasterRef = useRef<ToasterRef>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const pollTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const [step, setStep] = useState<'platform' | 'provider' | 'type' | 'method' | 'authorize'>('platform');
+  const [step, setStep] = useState<'platform' | 'provider' | 'method' | 'authorize'>('platform');
   const [platform, setPlatform] = useState<'antigravity' | 'kiro' | ''>('');
   const [provider, setProvider] = useState<'Google' | 'Github' | ''>(''); // Kiro OAuth提供商
-  const [accountType, setAccountType] = useState<0 | 1>(0); // 0=专属, 1=共享
   const [loginMethod, setLoginMethod] = useState<'antihook' | 'manual' | 'refresh_token' | ''>(''); // Antigravity 登录方式
   const [kiroLoginMethod, setKiroLoginMethod] = useState<'oauth' | 'refresh_token' | ''>('');
   const [kiroImportAuthMethod, setKiroImportAuthMethod] = useState<'Social' | 'IdC'>('Social');
@@ -45,29 +43,8 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
   const [oauthUrl, setOauthUrl] = useState('');
   const [oauthState, setOauthState] = useState(''); // Kiro OAuth state
   const [callbackUrl, setCallbackUrl] = useState('');
-  const [hasBeta, setHasBeta] = useState(false);
-  const [isCheckingBeta, setIsCheckingBeta] = useState(true);
   const [countdown, setCountdown] = useState(600); // Kiro授权倒计时（600秒）
   const [isWaitingAuth, setIsWaitingAuth] = useState(false); // Kiro是否等待授权中
-
-  // 检查用户Beta权限
-  useEffect(() => {
-    if (open) {
-      checkBetaStatus();
-    }
-  }, [open]);
-
-  const checkBetaStatus = async () => {
-    try {
-      const user = await getCurrentUser();
-      setHasBeta(user.beta === 1);
-    } catch (err) {
-      console.error('检查Beta状态失败:', err);
-      setHasBeta(false);
-    } finally {
-      setIsCheckingBeta(false);
-    }
-  };
 
   // 清理定时器
   useEffect(() => {
@@ -92,12 +69,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
         });
         return;
       }
-      // Kiro需要选择OAuth提供商
-      if (platform === 'kiro') {
-        setStep('method');
-      } else {
-        setStep('type');
-      }
+      setStep('method');
     } else if (step === 'provider') {
       if (!provider) {
         toasterRef.current?.show({
@@ -108,50 +80,24 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
         });
         return;
       }
-      setStep('type');
-    } else if (step === 'type') {
-      // Antigravity 账号需要选择登录方式
-      if (platform === 'antigravity') {
-        setStep('method');
-      } else {
-        // Kiro 账号直接进入授权
-        if (kiroLoginMethod === 'refresh_token') {
-          setOauthUrl('');
-          setOauthState('');
-          setCountdown(600);
-          setIsWaitingAuth(false);
-          setStep('authorize');
-          return;
-        }
 
-        if (kiroLoginMethod !== 'oauth') {
-          toasterRef.current?.show({
-            title: '选择方式',
-            message: '请选择添加方式',
-            variant: 'warning',
-            position: 'top-right',
-          });
-          return;
-        }
-
-        try {
-          const result = await getKiroOAuthAuthorizeUrl(provider as 'Google' | 'Github', accountType);
-          setOauthUrl(result.data.auth_url);
-          setOauthState(result.data.state);
-          setCountdown(result.data.expires_in);
-          setIsWaitingAuth(true);
-          startCountdownTimer(result.data.expires_in);
-          startPollingOAuthStatus(result.data.state);
-          setStep('authorize');
-        } catch (err) {
-          toasterRef.current?.show({
-            title: '获取失败',
-            message: err instanceof Error ? err.message : '获取授权链接失败',
-            variant: 'error',
-            position: 'top-right',
-          });
-          throw err;
-        }
+      try {
+        const result = await getKiroOAuthAuthorizeUrl(provider as 'Google' | 'Github', 0);
+        setOauthUrl(result.data.auth_url);
+        setOauthState(result.data.state);
+        setCountdown(result.data.expires_in);
+        setIsWaitingAuth(true);
+        startCountdownTimer(result.data.expires_in);
+        startPollingOAuthStatus(result.data.state);
+        setStep('authorize');
+      } catch (err) {
+        toasterRef.current?.show({
+          title: '获取失败',
+          message: err instanceof Error ? err.message : '获取授权链接失败',
+          variant: 'error',
+          position: 'top-right',
+        });
+        throw err;
       }
     } else if (step === 'method') {
       if (platform === 'kiro') {
@@ -170,7 +116,11 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
           return;
         }
 
-        setStep('type');
+        setOauthUrl('');
+        setOauthState('');
+        setCountdown(600);
+        setIsWaitingAuth(false);
+        setStep('authorize');
         return;
       }
 
@@ -207,7 +157,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
       
       // 手动回调才需要获取授权链接并进入下一页
       try {
-        const { auth_url } = await getOAuthAuthorizeUrl(accountType);
+        const { auth_url } = await getOAuthAuthorizeUrl(0);
         setOauthUrl(auth_url);
         setStep('authorize');
       } catch (err) {
@@ -225,22 +175,11 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
   const handleBack = () => {
     if (step === 'provider') {
       setStep('method');
-    } else if (step === 'type') {
-      if (platform === 'kiro') {
-        if (kiroLoginMethod === 'oauth') {
-          setStep('provider');
-        } else {
-          setStep('method');
-        }
-      } else {
-        setStep('platform');
-      }
     } else if (step === 'method') {
+      setStep('platform');
       if (platform === 'antigravity') {
-        setStep('type');
         setLoginMethod('');
       } else {
-        setStep('platform');
         setKiroLoginMethod('');
       }
     } else if (step === 'authorize') {
@@ -260,9 +199,14 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
       if (platform === 'antigravity') {
         setStep('method');
       } else {
-        setStep('type');
+        if (kiroLoginMethod === 'oauth') {
+          setStep('provider');
+        } else {
+          setStep('method');
+        }
       }
       setOauthUrl('');
+      setOauthState('');
       setCallbackUrl('');
       setAntigravityImportRefreshToken('');
     }
@@ -433,7 +377,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
     }
 
     try {
-      await importAccountByRefreshToken(refreshToken, accountType);
+      await importAccountByRefreshToken(refreshToken, 0);
       toasterRef.current?.show({
         title: '导入成功',
         message: '账号已成功添加',
@@ -487,9 +431,9 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
         refresh_token: refreshToken,
         auth_method: kiroImportAuthMethod,
         account_name: accountName || undefined,
-        client_id: kiroImportAuthMethod === 'IdC' ? clientId : undefined,
+        client_id: kiroImportAuthMethod === 'IdC' ? clientId : undefined,       
         client_secret: kiroImportAuthMethod === 'IdC' ? clientSecret : undefined,
-        is_shared: accountType,
+        is_shared: 0,
       });
 
       toasterRef.current?.show({
@@ -528,7 +472,6 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
     setStep('platform');
     setPlatform('');
     setProvider('');
-    setAccountType(0);
     setLoginMethod('');
     setKiroLoginMethod('');
     setKiroImportAuthMethod('Social');
@@ -540,7 +483,6 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
     setOauthUrl('');
     setOauthState('');
     setCallbackUrl('');
-    setIsCheckingBeta(true);
     setCountdown(600);
     setIsWaitingAuth(false);
   };
@@ -550,7 +492,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
     const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
     if (!token) return '';
     // URL 格式: anti://antigravity?identity=<token>&is_shared=<0|1>
-    return `anti://antigravity?identity=${encodeURIComponent(token)}&is_shared=${accountType}`;
+    return `anti://antigravity?identity=${encodeURIComponent(token)}&is_shared=0`;
   };
 
   // 打开 Antihook 登录
@@ -654,38 +596,35 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                   </div>
                 </label>
 
-                {/* Kiro平台 - 仅Beta用户可见 */}
-                {hasBeta && (
-                  <label
-                    className={cn(
-                      "flex items-center gap-3 p-4 border-2 rounded-lg cursor-pointer transition-colors",
-                      platform === 'kiro' ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"
-                    )}
-                  >
-                    <input
-                      type="radio"
-                      name="platform"
-                      value="kiro"
-                      checked={platform === 'kiro'}
-                      onChange={(e) => setPlatform(e.target.value as 'kiro')}
-                      className="w-4 h-4"
-                    />
-                    <img
-                      src="/kiro.png"
-                      alt="Kiro"
-                      className="w-10 h-10 rounded-lg"
-                    />
-                    <div className="flex-1">
-                      <div className="flex items-center justify-between">
-                        <h3 className="font-semibold">Kiro</h3>
-                        <Badge1 variant="turbo">Beta</Badge1>
-                      </div>
-                      <p className="text-sm text-muted-foreground mt-1">
-                        Google 与 Github OAuth
-                      </p>
+                <label
+                  className={cn(
+                    "flex items-center gap-3 p-4 border-2 rounded-lg cursor-pointer transition-colors",
+                    platform === 'kiro' ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"
+                  )}
+                >
+                  <input
+                    type="radio"
+                    name="platform"
+                    value="kiro"
+                    checked={platform === 'kiro'}
+                    onChange={(e) => setPlatform(e.target.value as 'kiro')}
+                    className="w-4 h-4"
+                  />
+                  <img
+                    src="/kiro.png"
+                    alt="Kiro"
+                    className="w-10 h-10 rounded-lg"
+                  />
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between">
+                      <h3 className="font-semibold">Kiro</h3>
+                      <Badge variant="secondary">可用</Badge>
                     </div>
-                  </label>
-                )}
+                    <p className="text-sm text-muted-foreground mt-1">
+                      Google 与 Github OAuth
+                    </p>
+                  </div>
+                </label>
               </div>
             </div>
           )}
@@ -775,81 +714,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
             </div>
           )}
 
-          {/* 步骤 3: 选择账号类型 */}
-          {step === 'type' && (
-            <div className="space-y-4">
-              <p className="text-sm text-muted-foreground">
-                选择 {platform === 'antigravity' ? 'Antigravity' : 'Kiro'} 账号类型
-              </p>
-
-              <div className="space-y-3">
-                {/* 专属账号 */}
-                <label
-                  className={cn(
-                    "flex items-start gap-3 p-4 border-2 rounded-lg cursor-pointer transition-colors",
-                    accountType === 0 ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"
-                  )}
-                >
-                  <input
-                    type="radio"
-                    name="accountType"
-                    value="0"
-                    checked={accountType === 0}
-                    onChange={() => setAccountType(0)}
-                    className="w-4 h-4 mt-1"
-                  />
-                  <div className="flex-1">
-                    <div className="flex items-center justify-between">
-                      <h3 className="font-semibold">专属账号</h3>
-                    </div>
-                    {accountType === 0 && (
-                      <p className="text-xs text-red-400 mt-2">
-                        此账号不会被加入共享账号池，您也不会从中获得额外的共享配额。
-                      </p>
-                    )}
-                  </div>
-                </label>
-
-                {/* 共享账号 */}
-                <label
-                  className={cn(
-                    "flex items-start gap-3 p-4 border-2 rounded-lg transition-colors",
-                    platform === 'kiro'
-                      ? "opacity-50 cursor-not-allowed border-border"
-                      : accountType === 1
-                        ? "border-primary bg-primary/5 cursor-pointer"
-                        : "border-border hover:border-primary/50 cursor-pointer"
-                  )}
-                >
-                  <input
-                    type="radio"
-                    name="accountType"
-                    value="1"
-                    checked={accountType === 1}
-                    onChange={() => setAccountType(1)}
-                    disabled={platform === 'kiro'}
-                    className="w-4 h-4 mt-1"
-                  />
-                  <div className="flex-1">
-                    <div className="flex items-center justify-between">
-                      <h3 className="font-semibold">共享账号</h3>
-                    </div>
-                    {platform === 'kiro' ? (
-                      <p className="text-xs text-muted-foreground mt-2">
-                        此选项在 Beta 中暂不可用。
-                      </p>
-                    ) : accountType === 1 ? (
-                      <p className="text-xs text-red-400 mt-2">
-                        您的帐号将会加入共享账号池以供他人使用。作为回报，您可以获得2倍于您提交的共享账号的配额。
-                      </p>
-                    ) : null}
-                  </div>
-                </label>
-              </div>
-            </div>
-          )}
-
-          {/* 步骤 4: 选择登录方式 (仅Antigravity) */}
+          {/* 选择添加方式 (Kiro) */}
           {step === 'method' && platform === 'kiro' && (
             <div className="space-y-4">
               <p className="text-sm text-muted-foreground">
@@ -1332,7 +1197,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
           ) : (
             <Button
               onClick={handleContinue}
-              disabled={step === 'platform' && !platform}
+              disabled={(step === 'platform' && !platform) || (step === 'provider' && !provider)}
               className="flex-1 cursor-pointer"
             >
               继续

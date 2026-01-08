@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useRef } from 'react';
-import { getAPIKeys, generateAPIKey, deleteAPIKey, getCookiePreference, updateCookiePreference, getCurrentUser, type PluginAPIKey } from '@/lib/api';
+import { getAPIKeys, generateAPIKey, deleteAPIKey, getCookiePreference, updateCookiePreference, type PluginAPIKey } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -19,7 +19,6 @@ import { IconCopy, IconKey, IconTrash, IconEye, IconEyeOff, IconSettings, IconPl
 import { MorphingSquare } from '@/components/ui/morphing-square';
 import { cn } from '@/lib/utils';
 import Toaster, { ToasterRef } from '@/components/ui/toast';
-import { Badge as Badge1 } from '@/components/ui/badge-1';
 import { getPublicApiBaseUrl } from '@/lib/apiBase';
 
 export default function SettingsPage() {
@@ -34,7 +33,6 @@ export default function SettingsPage() {
   const [deletingKeyId, setDeletingKeyId] = useState<number | null>(null);
   const [preferShared, setPreferShared] = useState<number>(0); // 0=专属优先, 1=共享优先
   const [isUpdatingPreference, setIsUpdatingPreference] = useState(false);
-  const [hasBeta, setHasBeta] = useState(false);
   const [selectedConfigType, setSelectedConfigType] = useState<'antigravity' | 'kiro'>('antigravity');
   const [keyName, setKeyName] = useState('');
 
@@ -68,20 +66,11 @@ export default function SettingsPage() {
 
   useEffect(() => {
     const loadData = async () => {
-      await Promise.all([loadAPIKeys(), loadPreference(), checkBetaStatus()]);
+      await Promise.all([loadAPIKeys(), loadPreference()]);
       setIsLoading(false);
     };
     loadData();
   }, []);
-
-  const checkBetaStatus = async () => {
-    try {
-      const user = await getCurrentUser();
-      setHasBeta(user.beta === 1);
-    } catch (err) {
-      setHasBeta(false);
-    }
-  };
 
   const handleUpdatePreference = async (newPreference: number) => {
     setIsUpdatingPreference(true);
@@ -259,9 +248,9 @@ export default function SettingsPage() {
                           </td>
                           <td className="p-3">
                             {key.config_type === 'kiro' ? (
-                              <Badge1 variant="turbo">
+                              <Badge>
                                 Kiro
-                              </Badge1>
+                              </Badge>
                             ) : (
                               <Badge variant="secondary">
                                 Antigravity
@@ -465,12 +454,10 @@ export default function SettingsPage() {
               {/* Kiro */}
               <label
                 className={cn(
-                  "flex items-start gap-3 p-4 border-2 rounded-lg transition-colors",
-                  !hasBeta
-                    ? "opacity-50 cursor-not-allowed border-border"
-                    : selectedConfigType === 'kiro'
-                      ? "border-primary bg-primary/5 cursor-pointer"
-                      : "border-border hover:border-primary/50 cursor-pointer"
+                  "flex items-start gap-3 p-4 border-2 rounded-lg cursor-pointer transition-colors",
+                  selectedConfigType === 'kiro'
+                    ? "border-primary bg-primary/5"
+                    : "border-border hover:border-primary/50"
                 )}
               >
                 <input
@@ -479,18 +466,14 @@ export default function SettingsPage() {
                   value="kiro"
                   checked={selectedConfigType === 'kiro'}
                   onChange={() => setSelectedConfigType('kiro')}
-                  disabled={!hasBeta}
                   className="w-4 h-4 mt-1"
                 />
                 <div className="flex-1">
                   <div className="flex items-center justify-between">
                     <h3 className="font-semibold">Kiro</h3>
-                    <Badge1 variant="turbo">
-                      Beta
-                    </Badge1>
                   </div>
                   <p className="text-xs text-muted-foreground mt-1">
-                    {hasBeta ? '使用Kiro账号配额' : '需要加入Beta计划'}
+                    使用Kiro账号配额
                   </p>
                 </div>
               </label>

@@ -1,6 +1,6 @@
 const DEFAULT_DEV_API_BASE_URL = 'http://localhost:8008';
 const DEFAULT_PROD_PUBLIC_API_BASE_URL = '/backend';
-const DEFAULT_PROD_INTERNAL_API_BASE_URL = 'http://backend:8000';
+const DEFAULT_PROD_INTERNAL_API_BASE_URL = 'http://antihub-backend:8000';
 
 function isAbsoluteUrl(value: string): boolean {
   return /^https?:\/\//i.test(value);
@@ -27,4 +27,3 @@ export function getInternalApiBaseUrl(): string {
 export function getApiBaseUrlForRuntime(): string {
   return typeof window === 'undefined' ? getInternalApiBaseUrl() : getPublicApiBaseUrl();
 }
-

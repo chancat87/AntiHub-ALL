@@ -7,7 +7,6 @@ import {
   getKiroConsumptionStats,
   getKiroAccounts,
   getKiroAccountConsumption,
-  getCurrentUser,
   type UserQuotaItem,
   type QuotaConsumption,
   type KiroConsumptionStats,
@@ -43,7 +42,6 @@ import {
 import { MorphingSquare } from '@/components/ui/morphing-square';
 import { Gemini, Claude, OpenAI } from '@lobehub/icons';
 import Toaster, { ToasterRef } from '@/components/ui/toast';
-import { Badge as Badge1 } from '@/components/ui/badge-1';
 
 export default function AnalyticsPage() {
   const toasterRef = useRef<ToasterRef>(null);
@@ -57,7 +55,6 @@ export default function AnalyticsPage() {
   const [antigravityCurrentPage, setAntigravityCurrentPage] = useState(1); // Antigravity 分页
   const [totalRecords, setTotalRecords] = useState(0);
   const [antigravityTotalRecords, setAntigravityTotalRecords] = useState(0); // Antigravity 总记录数
-  const [hasBeta, setHasBeta] = useState(false);
   const [activeTab, setActiveTab] = useState<'antigravity' | 'kiro'>('antigravity');
   const [isLoading, setIsLoading] = useState(true);
   const pageSize = 50;
@@ -69,9 +66,6 @@ export default function AnalyticsPage() {
   const loadData = async () => {
     setIsLoading(true);
     try {
-      const user = await getCurrentUser();
-      setHasBeta(user.beta === 1);
-
       if (activeTab === 'antigravity') {
         const [quotasData, consumptionsData] = await Promise.all([
           getUserQuotas(),
@@ -85,7 +79,7 @@ export default function AnalyticsPage() {
         const startIndex = (antigravityCurrentPage - 1) * pageSize;
         const endIndex = startIndex + pageSize;
         setConsumptions(consumptionsData.slice(startIndex, endIndex));
-      } else if (activeTab === 'kiro' && user.beta === 1) {
+      } else if (activeTab === 'kiro') {
         const [statsData, accountsData] = await Promise.all([
           getKiroConsumptionStats(),
           getKiroAccounts()
@@ -249,45 +243,37 @@ export default function AnalyticsPage() {
         {/* 页面标题和配置选择 */}
         <div className="flex items-center justify-between mb-6">
           <div></div>
-          {hasBeta && (
-            <Select value={activeTab} onValueChange={(value: 'antigravity' | 'kiro') => setActiveTab(value)}>
-              <SelectTrigger className="w-[160px] h-9">
-                <SelectValue>
-                  {activeTab === 'antigravity' ? (
-                    <span className="flex items-center gap-2">
-                      <img src="/antigravity-logo.png" alt="" className="size-4 rounded" />
-                      Antigravity
-                    </span>
-                  ) : (
-                    <span className="flex items-center gap-2">
-                      <img src="/kiro.png" alt="" className="size-4 rounded" />
-                      Kiro
-                      <Badge1 variant="turbo">
-                        Beta
-                      </Badge1>
-                    </span>
-                  )}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="antigravity">
+          <Select value={activeTab} onValueChange={(value: 'antigravity' | 'kiro') => setActiveTab(value)}>
+            <SelectTrigger className="w-[160px] h-9">
+              <SelectValue>
+                {activeTab === 'antigravity' ? (
                   <span className="flex items-center gap-2">
                     <img src="/antigravity-logo.png" alt="" className="size-4 rounded" />
                     Antigravity
                   </span>
-                </SelectItem>
-                <SelectItem value="kiro">
+                ) : (
                   <span className="flex items-center gap-2">
                     <img src="/kiro.png" alt="" className="size-4 rounded" />
                     Kiro
-                    <Badge1 variant="turbo">
-                      Beta
-                    </Badge1>
                   </span>
-                </SelectItem>
-              </SelectContent>
-            </Select>
-          )}
+                )}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="antigravity">
+                <span className="flex items-center gap-2">
+                  <img src="/antigravity-logo.png" alt="" className="size-4 rounded" />
+                  Antigravity
+                </span>
+              </SelectItem>
+              <SelectItem value="kiro">
+                <span className="flex items-center gap-2">
+                  <img src="/kiro.png" alt="" className="size-4 rounded" />
+                  Kiro
+                </span>
+              </SelectItem>
+            </SelectContent>
+          </Select>
         </div>
 
         <Toaster ref={toasterRef} defaultPosition="top-right" />
@@ -475,15 +461,12 @@ export default function AnalyticsPage() {
         )}
 
         {/* Kiro 消费统计 */}
-        {activeTab === 'kiro' && hasBeta && (
+        {activeTab === 'kiro' && (
           <>
             {/* 总体统计 */}
             <Card className="mb-6">
               <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  消费统计
-                  <Badge1 variant="turbo">Beta</Badge1>
-                </CardTitle>
+                <CardTitle>消费统计</CardTitle>
               </CardHeader>
               <CardContent>
                 {kiroStats && kiroStats.total_credit !== undefined ? (
