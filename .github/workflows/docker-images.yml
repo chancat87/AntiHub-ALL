@@ -17,7 +17,6 @@ jobs:
       web: ${{ steps.filter.outputs.web }}
       backend: ${{ steps.filter.outputs.backend }}
       plugin: ${{ steps.filter.outputs.plugin }}
-      antihook: ${{ steps.filter.outputs.antihook }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,8 +32,6 @@ jobs:
               - 'AntiHub-Backend/**'
             plugin:
               - 'AntiHub-plugin/**'
-            antihook:
-              - 'AntiHook/**'
           ignore: |
             **/*.md
             docs/**
@@ -192,126 +189,3 @@ jobs:
           labels: ${{ steps.meta_plugin.outputs.labels }}
           cache-from: type=gha,scope=plugin
           cache-to: type=gha,mode=max,scope=plugin
-
-  # 构建 AntiHook Windows 版本
-  build-antihook:
-    needs: changes
-    # 当 antihook 有变更时构建
-    if: needs.changes.outputs.antihook == 'true'
-    runs-on: windows-latest
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
-
-      - name: Get dependencies
-        working-directory: ./AntiHook
-        run: go mod download
-
-      - name: Generate version and tag
-        id: version
-        shell: bash
-        run: |
-          date=$(date -u +"%Y%m%d")
-          tag="AntiHook-$date"
-          echo "TAG=$tag" >> $GITHUB_OUTPUT
-          echo "Generated tag: $tag"
-
-      - name: Build AntiHook for Windows
-        working-directory: ./AntiHook
-        shell: bash
-        env:
-          KIRO_SERVER_URL: 'https://antihub.zxiaoruan.cn'
-          SERVER_URL: 'https://antihub.zxiaoruan.cn'
-          BACKEND_URL: 'https://antihub.zxiaoruan.cn'
-        run: |
-          LDFLAGS="-s -w"
-          LDFLAGS="$LDFLAGS -X 'main.DefaultServerURL=${{ env.KIRO_SERVER_URL }}'"
-          LDFLAGS="$LDFLAGS -X 'main.DefaultBackendURL=${{ env.BACKEND_URL }}'"
-          LDFLAGS="$LDFLAGS -X 'main.BuildVersion=${{ steps.version.outputs.TAG }}'"
-          LDFLAGS="$LDFLAGS -X 'main.BuildTime=$(date -u +"%Y-%m-%dT%H:%M:%SZ")'"
-          
-          GOOS=windows GOARCH=amd64 \
-            go build -v -ldflags="$LDFLAGS" -o antihook.exe .
-          
-          echo "Built: antihook.exe"
-          ls -lh antihook.exe
-
-      - name: Get commit message
-        id: commit
-        run: |
-          $commit_msg = git log -1 --pretty=%B
-          # 处理多行消息
-          $commit_msg = $commit_msg -replace "`r`n", "`n"
-          $commit_msg = $commit_msg | ConvertTo-Json
-          echo "MESSAGE=$commit_msg" >> $env:GITHUB_OUTPUT
-
-      - name: Create and push tag
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag ${{ steps.version.outputs.TAG }}
-          git push origin ${{ steps.version.outputs.TAG }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ steps.version.outputs.TAG }}
-          name: ${{ steps.version.outputs.TAG }}
-          files: AntiHook/antihook.exe
-          draft: false
-          prerelease: false
-          body: ${{ steps.commit.outputs.MESSAGE }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # 构建 AntiHook Windows 版本
-  build-antihook:
-    needs: changes
-    # 当 antihook 有变更时构建
-    if: needs.changes.outputs.antihook == 'true'
-    runs-on: windows-latest
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
-
-      - name: Get dependencies
-        working-directory: ./AntiHook
-        run: go mod download
-
-      - name: Generate version and tag
-        id: version
-        shell: bash
-        run: |
-          date=$(date -u +"%Y%m%d")
-          tag="AntiHook-$date"
-          echo "TAG=$tag" >> $GITHUB_OUTPUT
-          echo "Generated tag: $tag"
-
-      - name: Build AntiHook for Windows
-        working-directory: ./AntiHook
-        shell: bash
-        env:
-          KIRO_SERVER_URL: 'https://antihub.zxiaoruan.cn'
-          SERVER_URL: 'https://antihub.zxiaoruan.cn'
-          BACKEND_URL: 'https://antihub.zxiaoruan.cn'
-        run: |
-          LDFLAGS="-s -w"
-          LDFLAGS="$LDF
