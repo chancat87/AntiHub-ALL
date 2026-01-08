@@ -583,13 +583,13 @@ async function generateRequestBody(openaiMessages, modelName, parameters, openai
   }
 
   // 提取用户传入的 system 消息，合并为 systemInstruction
-  // 如果用户没有传入 system 消息，则使用配置文件中的默认值
+  // 优先使用配置文件中的默认值，用户传入的拼接到后面
   const systemMessages = openaiMessages.filter(msg => msg.role === 'system');
-  let systemInstructionText = '';
-  
+  let systemInstructionText = config.systemInstruction || '';
+
   if (systemMessages.length > 0) {
     // 合并所有 system 消息的内容
-    systemInstructionText = systemMessages.map(msg => {
+    const userSystemText = systemMessages.map(msg => {
       if (typeof msg.content === 'string') {
         return msg.content;
       } else if (Array.isArray(msg.content)) {
@@ -601,9 +601,9 @@ async function generateRequestBody(openaiMessages, modelName, parameters, openai
       }
       return '';
     }).join('\n\n');
-  } else {
-    // 如果用户没有传入 system 消息，使用配置文件中的默认值
-    systemInstructionText = config.systemInstruction || '';
+
+    // 拼接默认的 + 用户传入的
+    systemInstructionText = systemInstructionText ? `${systemInstructionText}\n\n${userSystemText}` : userSystemText;
   }
 
   const requestBody = {

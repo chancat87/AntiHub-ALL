@@ -356,7 +356,29 @@ class MultiAccountClient {
           callback({ type: 'error', content: responseText, upstreamResponse: responseText, upstreamRequest: requestBody });
           throw new ApiError(responseText, response.status, responseText);
         }
-        
+
+        // 429 既可能是账号配额耗尽，也可能是端点级限流；优先切换端点重试
+        if (response.status === 429) {
+          const nextEndpointIndex = endpointIndex + 1;
+          const totalEndpoints = getEndpointCount();
+
+          if (nextEndpointIndex < totalEndpoints) {
+            logger.warn(`[429错误] 端点[${endpointIndex}]返回429，尝试切换到端点[${nextEndpointIndex}]: cookie_id=${account.cookie_id}`);
+            return await this.generateResponse(
+              requestBody,
+              callback,
+              user_id,
+              model_name,
+              user,
+              account,
+              excludeCookieIds,
+              retryCount,
+              nextEndpointIndex,
+              firstError403Type
+            );
+          }
+        }
+
         // 检查是否是429配额耗尽错误，自动更换账号重试（最多5次）
         if (response.status === 429 || responseText.includes('quota') || responseText.includes('RESOURCE_EXHAUSTED')) {
           const MAX_RETRY_COUNT = 5;

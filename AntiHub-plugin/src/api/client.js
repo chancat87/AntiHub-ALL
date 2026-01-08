@@ -49,7 +49,18 @@ export async function generateAssistantResponse(requestBody, callback, endpointI
     
     if (!response.ok) {
       const responseText = await response.text();
-      
+
+      if (response.status === 429) {
+        // 上游端点级限流，优先切换端点重试
+        const nextEndpointIndex = endpointIndex + 1;
+        const totalEndpoints = getEndpointCount();
+
+        if (nextEndpointIndex < totalEndpoints) {
+          console.log(`[429错误] 端点[${endpointIndex}]返回429，尝试切换到端点[${nextEndpointIndex}]`);
+          return await generateAssistantResponse(requestBody, callback, nextEndpointIndex, firstError403Type);
+        }
+      }
+
       if (response.status === 403) {
         // 判断是否是 "The caller does not have permission" 错误
         const isPermissionDenied = responseText.includes('The caller does not have permission') || responseText.includes('PERMISSION_DENIED');
@@ -208,7 +219,18 @@ export async function getAvailableModels(endpointIndex = 0, firstError403Type = 
         throw new Error(`获取模型列表失败: 所有端点都返回403`);
       }
     }
-    
+
+    if (response.status === 429) {
+      // 上游端点级限流，优先切换端点重试
+      const nextEndpointIndex = endpointIndex + 1;
+      const totalEndpoints = getEndpointCount();
+
+      if (nextEndpointIndex < totalEndpoints) {
+        console.log(`[获取模型列表-429错误] 端点[${endpointIndex}]返回429，尝试切换到端点[${nextEndpointIndex}]`);
+        return await getAvailableModels(nextEndpointIndex, firstError403Type);
+      }
+    }
+
     data = await response.json();
 
     if (!response.ok) {
@@ -279,7 +301,18 @@ export async function generateImage(requestBody, endpointIndex = 0, firstError40
     
     if (!response.ok) {
       const responseText = await response.text();
-      
+
+      if (response.status === 429) {
+        // 上游端点级限流，优先切换端点重试
+        const nextEndpointIndex = endpointIndex + 1;
+        const totalEndpoints = getEndpointCount();
+
+        if (nextEndpointIndex < totalEndpoints) {
+          console.log(`[图片生成-429错误] 端点[${endpointIndex}]返回429，尝试切换到端点[${nextEndpointIndex}]`);
+          return await generateImage(requestBody, nextEndpointIndex, firstError403Type);
+        }
+      }
+
       if (response.status === 403) {
         // 判断是否是 "The caller does not have permission" 错误
         const isPermissionDenied = responseText.includes('The caller does not have permission') || responseText.includes('PERMISSION_DENIED');
