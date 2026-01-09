@@ -170,11 +170,8 @@ export function SectionCards() {
           </CardAction>
         </CardHeader>
         <CardFooter className="flex-col items-start gap-1.5 text-sm">
-          <div className="line-clamp-1 flex gap-2 font-medium">
-            Antigravity {(stats?.totalAccounts || 0) - (stats?.totalKiroAccounts || 0)} | Kiro {stats?.totalKiroAccounts || 0}
-          </div>
           <div className="text-muted-foreground">
-            双渠道账户合计
+            全部渠道合计
           </div>
         </CardFooter>
       </Card>
@@ -191,11 +188,8 @@ export function SectionCards() {
           </CardAction>
         </CardHeader>
         <CardFooter className="flex-col items-start gap-1.5 text-sm">
-          <div className="line-clamp-1 flex gap-2 font-medium">
-            Antigravity {stats?.activeAccounts || 0} | Kiro {stats?.activeKiroAccounts || 0}
-          </div>
           <div className="text-muted-foreground">
-            双渠道活跃账号
+            全部渠道活跃账号
           </div>
         </CardFooter>
       </Card>
@@ -215,7 +209,7 @@ export function SectionCards() {
           <div className="line-clamp-1 flex gap-2 font-medium">
             总消耗: {((stats?.totalQuotaConsumed || 0) + (stats?.totalKiroQuotaConsumed || 0)).toFixed(2)}
           </div>
-          <div className="text-muted-foreground">Antigravity + Kiro 配额消耗</div>
+          <div className="text-muted-foreground">全部渠道配额消耗合计</div>
         </CardFooter>
       </Card>
       <Card className="@container/card">
@@ -234,7 +228,7 @@ export function SectionCards() {
           <div className="line-clamp-1 flex gap-2 font-medium">
             总调用: {((stats?.totalRequests || 0) + (stats?.totalKiroRequests || 0)).toLocaleString()} 次
           </div>
-          <div className="text-muted-foreground">Antigravity + Kiro API 调用</div>
+          <div className="text-muted-foreground">全部渠道 API 调用合计</div>
         </CardFooter>
       </Card>
     </div>

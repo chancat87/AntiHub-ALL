@@ -80,14 +80,14 @@ export default function SettingsPage() {
       setPreferShared(newPreference);
       toasterRef.current?.show({
         title: '更新成功',
-        message: '已保存账户首选项配置',
+        message: '已保存账户偏好设置',
         variant: 'success',
         position: 'top-right',
       });
     } catch (err) {
       toasterRef.current?.show({
         title: '更新失败',
-        message: err instanceof Error ? err.message : '更新账户首选项失败',
+        message: err instanceof Error ? err.message : '更新偏好设置失败',
         variant: 'error',
         position: 'top-right',
       });
@@ -304,7 +304,7 @@ export default function SettingsPage() {
         <Card className="mt-6">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              首选项
+              偏好设置
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -368,12 +368,12 @@ export default function SettingsPage() {
         <Card className="mt-6">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              终结点
+              API 端点
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-3">
-              <Label className="text-sm font-medium">默认终结点</Label>
+              <Label className="text-sm font-medium">默认 API 端点</Label>
               <div className="flex gap-2">
                 <Input
                   value={apiEndpoint}
@@ -394,8 +394,8 @@ export default function SettingsPage() {
               <div className="flex gap-3">
                 <IconAlertTriangle className="size-5 text-yellow-500 shrink-0 mt-0.5" />
                 <div className="space-y-2 text-sm">
-                  <p className="font-medium text-yellow-500">温馨提示</p>
-                  <p className="font-sm text-muted-foreground">你必须提供有效的API密钥才能访问此终结点。要获取模型列表，你的账户内必须具有有效的专属账号或共享账号配额。我们支持OpenAI格式或Anthropic格式的消息。</p>
+                  <p className="font-medium text-yellow-500">注意</p>
+                  <p className="font-sm text-muted-foreground">你需要提供有效的 API 密钥才能访问此端点。要获取模型列表，你的账户内必须具有有效的专属账号或共享账号配额。我们支持 OpenAI 格式或 Anthropic 格式的消息。</p>
                 </div>
               </div>
             </div>

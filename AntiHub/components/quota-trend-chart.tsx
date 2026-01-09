@@ -89,7 +89,7 @@ export function QuotaTrendChart() {
         // 聚合 Antigravity 数据
         antigravityData.forEach(record => {
           const date = new Date(record.consumed_at)
-          const hourKey = new Date(date.getFullYear(), date.getMonth(), date.getDate(), date.getHours()).toISOString()
+          const hourKey = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}-${String(date.getUTCHours()).padStart(2, '0')}`
           const existing = hourlyData.get(hourKey) || { antigravity: 0, kiro: 0 }
           existing.antigravity += parseFloat(record.quota_consumed)
           hourlyData.set(hourKey, existing)
@@ -98,7 +98,7 @@ export function QuotaTrendChart() {
         // 聚合 Kiro 数据
         kiroData.forEach(record => {
           const date = new Date(record.consumed_at)
-          const hourKey = new Date(date.getFullYear(), date.getMonth(), date.getDate(), date.getHours()).toISOString()
+          const hourKey = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}-${String(date.getUTCHours()).padStart(2, '0')}`
           const existing = hourlyData.get(hourKey) || { antigravity: 0, kiro: 0 }
           existing.kiro += record.credit_used
           hourlyData.set(hourKey, existing)
@@ -108,7 +108,7 @@ export function QuotaTrendChart() {
         const chartData: TrendDataPoint[] = []
         for (let i = 0; i < hours; i++) {
           const time = new Date(now.getTime() - (hours - i) * 60 * 60 * 1000)
-          const hourKey = new Date(time.getFullYear(), time.getMonth(), time.getDate(), time.getHours()).toISOString()
+          const hourKey = `${time.getUTCFullYear()}-${String(time.getUTCMonth() + 1).padStart(2, '0')}-${String(time.getUTCDate()).padStart(2, '0')}-${String(time.getUTCHours()).padStart(2, '0')}`
           const data = hourlyData.get(hourKey) || { antigravity: 0, kiro: 0 }
 
           chartData.push({
@@ -224,7 +224,9 @@ export function QuotaTrendChart() {
               tickMargin={8}
               minTickGap={32}
               tickFormatter={(value) => {
-                const date = new Date(value)
+                // 解析 hourKey: "YYYY-MM-DD-HH"
+                const [year, month, day, hour] = value.split('-')
+                const date = new Date(Date.UTC(parseInt(year), parseInt(month) - 1, parseInt(day), parseInt(hour)))
                 return date.toLocaleString("zh-CN", {
                   month: "short",
                   day: "numeric",
@@ -243,12 +245,14 @@ export function QuotaTrendChart() {
               content={
                 <ChartTooltipContent
                   labelFormatter={(value) => {
-                    return new Date(value).toLocaleString("zh-CN", {
+                    // 解析 hourKey: "YYYY-MM-DD-HH"
+                    const [year, month, day, hour] = value.split('-')
+                    const date = new Date(Date.UTC(parseInt(year), parseInt(month) - 1, parseInt(day), parseInt(hour)))
+                    return date.toLocaleString("zh-CN", {
                       month: "short",
                       day: "numeric",
                       hour: "2-digit",
-                      minute: "2-digit",
-                    })
+                    }) + '点'
                   }}
                   indicator="dot"
                 />
