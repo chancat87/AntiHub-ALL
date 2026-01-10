@@ -7,6 +7,8 @@ import {
   submitOAuthCallback,
   getKiroOAuthAuthorizeUrl,
   pollKiroOAuthStatus,
+  getQwenOAuthAuthorizeUrl,
+  pollQwenOAuthStatus,
   importAccountByRefreshToken,
   importQwenAccount,
 } from '@/lib/api';
@@ -43,6 +45,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
   const [provider, setProvider] = useState<'Google' | 'Github' | ''>(''); // Kiro OAuth提供商
   const [loginMethod, setLoginMethod] = useState<'antihook' | 'manual' | 'refresh_token' | ''>(''); // Antigravity 登录方式
   const [kiroLoginMethod, setKiroLoginMethod] = useState<'oauth' | 'refresh_token' | ''>('');
+  const [qwenLoginMethod, setQwenLoginMethod] = useState<'oauth' | 'json'>('oauth');
   const [kiroImportAuthMethod, setKiroImportAuthMethod] = useState<'Social' | 'IdC'>('Social');
   const [kiroImportRefreshToken, setKiroImportRefreshToken] = useState('');
   const [kiroImportClientId, setKiroImportClientId] = useState('');
@@ -205,7 +208,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
         setKiroLoginMethod('');
       }
     } else if (step === 'authorize') {
-      if (platform === 'kiro') {
+      if (platform === 'kiro' || platform === 'qwen') {
         if (timerRef.current) {
           clearInterval(timerRef.current);
           timerRef.current = null;
@@ -348,6 +351,74 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
     }, 3000); // 每3秒轮询一次
   };
 
+  // 轮询 Qwen OAuth（Device Flow）登录状态
+  const startPollingQwenOAuthStatus = (state: string) => {
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+    }
+
+    pollTimerRef.current = setInterval(async () => {
+      try {
+        const result = await pollQwenOAuthStatus(state);
+
+        if (result.status === 'completed') {
+          if (pollTimerRef.current) {
+            clearInterval(pollTimerRef.current);
+            pollTimerRef.current = null;
+          }
+          if (timerRef.current) {
+            clearInterval(timerRef.current);
+            timerRef.current = null;
+          }
+
+          toasterRef.current?.show({
+            title: '授权成功',
+            message: 'Qwen 账号已成功添加',
+            variant: 'success',
+            position: 'top-right',
+          });
+
+          window.dispatchEvent(new CustomEvent('accountAdded'));
+          onOpenChange(false);
+          resetState();
+          onSuccess?.();
+          return;
+        }
+
+        if (result.status === 'failed') {
+          if (pollTimerRef.current) {
+            clearInterval(pollTimerRef.current);
+            pollTimerRef.current = null;
+          }
+          setIsWaitingAuth(false);
+          toasterRef.current?.show({
+            title: '授权失败',
+            message: result.message || (result as any).error || '授权失败，请重试',
+            variant: 'error',
+            position: 'top-right',
+          });
+          return;
+        }
+
+        if (result.status === 'expired') {
+          if (pollTimerRef.current) {
+            clearInterval(pollTimerRef.current);
+            pollTimerRef.current = null;
+          }
+          setIsWaitingAuth(false);
+          toasterRef.current?.show({
+            title: '授权已过期',
+            message: '请返回重新开始',
+            variant: 'warning',
+            position: 'top-right',
+          });
+        }
+      } catch (error) {
+        console.error('轮询Qwen OAuth状态失败:', error);
+      }
+    }, 3000);
+  };
+
   // 格式化倒计时显示
   const formatCountdown = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -485,6 +556,31 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
     }
   };
 
+  const handleStartQwenOAuth = async () => {
+    try {
+      const accountName = qwenAccountName.trim();
+      const result = await getQwenOAuthAuthorizeUrl(qwenIsShared, accountName || undefined);
+
+      setOauthUrl(result.data.auth_url);
+      setOauthState(result.data.state);
+      setCountdown(result.data.expires_in);
+      setIsWaitingAuth(true);
+      startCountdownTimer(result.data.expires_in);
+      startPollingQwenOAuthStatus(result.data.state);
+
+      // 直接打开授权页面（Device Flow 不需要回填 callback）
+      window.open(result.data.auth_url, '_blank', 'width=600,height=700');
+    } catch (err) {
+      toasterRef.current?.show({
+        title: '获取授权链接失败',
+        message: err instanceof Error ? err.message : '获取Qwen授权链接失败',
+        variant: 'error',
+        position: 'top-right',
+      });
+      throw err;
+    }
+  };
+
   const handleImportQwenAccount = async () => {
     const credentialJson = qwenCredentialJson.trim();
     if (!credentialJson) {
@@ -580,6 +676,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
     setProvider('');
     setLoginMethod('');
     setKiroLoginMethod('');
+    setQwenLoginMethod('oauth');
     setKiroImportAuthMethod('Social');
     setKiroImportRefreshToken('');
     setKiroImportClientId('');
@@ -1001,15 +1098,69 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
               {platform === 'qwen' ? (
                 <>
                   <div className="space-y-3">
-                    <Label className="text-base font-semibold">Qwen 凭证导入</Label>
-                    <p className="text-sm text-muted-foreground">
-                      直接粘贴 QwenCli 导出的 JSON 凭证（包含 access_token 等字段），服务端会校验并写入账号。
-                    </p>
+                    <Label className="text-base font-semibold">Qwen 登录方式</Label>
+                    <div className="space-y-3">
+                      <label
+                        className={cn(
+                          "flex items-start gap-3 p-4 border-2 rounded-lg cursor-pointer transition-colors",
+                          qwenLoginMethod === 'oauth' ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"
+                        )}
+                      >
+                        <input
+                          type="radio"
+                          name="qwenLoginMethod"
+                          value="oauth"
+                          checked={qwenLoginMethod === 'oauth'}
+                          onChange={() => setQwenLoginMethod('oauth')}
+                          className="w-4 h-4 mt-1"
+                        />
+                        <div className="flex-1">
+                          <h3 className="font-semibold">一键登录（OAuth，推荐）</h3>
+                          <p className="text-sm text-muted-foreground mt-1">
+                            打开授权页面后自动轮询完成登录
+                          </p>
+                        </div>
+                      </label>
+
+                      <label
+                        className={cn(
+                          "flex items-start gap-3 p-4 border-2 rounded-lg cursor-pointer transition-colors",
+                          qwenLoginMethod === 'json' ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"
+                        )}
+                      >
+                        <input
+                          type="radio"
+                          name="qwenLoginMethod"
+                          value="json"
+                          checked={qwenLoginMethod === 'json'}
+                          onChange={() => setQwenLoginMethod('json')}
+                          className="w-4 h-4 mt-1"
+                        />
+                        <div className="flex-1">
+                          <h3 className="font-semibold">凭证 JSON 导入</h3>
+                          <p className="text-sm text-muted-foreground mt-1">
+                            适合你已经从 QwenCli 导出了 credential_json
+                          </p>
+                        </div>
+                      </label>
+                    </div>
+
+                    {qwenLoginMethod === 'oauth' ? (
+                      <p className="text-sm text-muted-foreground">
+                        将打开 Qwen 授权页面，完成后系统会自动轮询并写入账号（不需要粘贴回调地址）。
+                      </p>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        直接粘贴 QwenCli 导出的 JSON 凭证（包含 access_token 等字段），服务端会校验并写入账号。
+                      </p>
+                    )}
                     <div className="p-4 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
                       <p className="text-xs text-yellow-600 dark:text-yellow-400">
                         <strong>提示</strong>
                         <br />
-                        凭证包含敏感 token，请只在可信环境中粘贴，并避免截图/外发。
+                        {qwenLoginMethod === 'oauth'
+                          ? '授权成功后不会在页面展示 token，服务端会安全保存并用于模型调用。'
+                          : '凭证包含敏感 token，请只在可信环境中粘贴，并避免截图/外发。'}
                       </p>
                     </div>
                   </div>
@@ -1076,18 +1227,73 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                     </div>
                   </div>
 
-                  <div className="space-y-3">
-                    <Label htmlFor="qwen-credential-json" className="text-base font-semibold">
-                      credential_json
-                    </Label>
-                    <Textarea
-                      id="qwen-credential-json"
-                      placeholder="在此粘贴 QwenCli 导出的 JSON"
-                      value={qwenCredentialJson}
-                      onChange={(e) => setQwenCredentialJson(e.target.value)}
-                      className="font-mono text-sm min-h-[220px]"
-                    />
-                  </div>
+                  {qwenLoginMethod === 'json' ? (
+                    <div className="space-y-3">
+                      <Label htmlFor="qwen-credential-json" className="text-base font-semibold">
+                        credential_json
+                      </Label>
+                      <Textarea
+                        id="qwen-credential-json"
+                        placeholder="在此粘贴 QwenCli 导出的 JSON"
+                        value={qwenCredentialJson}
+                        onChange={(e) => setQwenCredentialJson(e.target.value)}
+                        className="font-mono text-sm min-h-[220px]"
+                      />
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      <Label className="text-base font-semibold">授权操作</Label>
+                      <p className="text-sm text-muted-foreground">
+                        点击生成授权链接后，在打开的页面完成授权；系统会自动轮询并写入账号。
+                      </p>
+
+                      <div className="flex gap-2">
+                        <StatefulButton
+                          onClick={handleStartQwenOAuth}
+                          disabled={isWaitingAuth && countdown > 0}
+                          className="flex-1 cursor-pointer"
+                        >
+                          {oauthUrl ? '重新生成并打开' : '生成并打开授权页面'}
+                        </StatefulButton>
+
+                        <Button
+                          onClick={handleOpenOAuthUrl}
+                          variant="outline"
+                          size="lg"
+                          disabled={!oauthUrl}
+                        >
+                          <IconExternalLink className="size-4 mr-2" />
+                          打开
+                        </Button>
+
+                        <Button
+                          onClick={() => {
+                            if (oauthUrl) {
+                              navigator.clipboard.writeText(oauthUrl);
+                              toasterRef.current?.show({
+                                title: '复制成功',
+                                message: '授权链接已复制到剪贴板',
+                                variant: 'success',
+                                position: 'top-right',
+                              });
+                            }
+                          }}
+                          variant="outline"
+                          size="lg"
+                          disabled={!oauthUrl}
+                        >
+                          <IconCopy className="size-4 mr-2" />
+                          复制
+                        </Button>
+                      </div>
+
+                      {isWaitingAuth && countdown > 0 && (
+                        <p className="text-sm text-muted-foreground">
+                          正在等待授权... 剩余 {formatCountdown(countdown)}
+                        </p>
+                      )}
+                    </div>
+                  )}
                 </>
               ) : platform === 'antigravity' && loginMethod === 'refresh_token' ? (
                 <>
@@ -1365,7 +1571,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
               variant="outline"
               onClick={handleBack}
               className="flex-1 cursor-pointer"
-              disabled={platform === 'kiro' && isWaitingAuth && countdown > 0}
+              disabled={(platform === 'kiro' || platform === 'qwen') && isWaitingAuth && countdown > 0}
             >
               上一步
             </Button>
@@ -1373,13 +1579,23 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
 
           {step === 'authorize' ? (
             platform === 'qwen' ? (
-              <StatefulButton
-                onClick={handleImportQwenAccount}
-                disabled={!qwenCredentialJson.trim()}
-                className="flex-1 cursor-pointer"
-              >
-                完成导入
-              </StatefulButton>
+              qwenLoginMethod === 'json' ? (
+                <StatefulButton
+                  onClick={handleImportQwenAccount}
+                  disabled={!qwenCredentialJson.trim()}
+                  className="flex-1 cursor-pointer"
+                >
+                  完成导入
+                </StatefulButton>
+              ) : (
+                <Button
+                  onClick={handleClose}
+                  disabled={isWaitingAuth && countdown > 0}
+                  className="flex-1 cursor-pointer"
+                >
+                  {isWaitingAuth && countdown > 0 ? '等待授权中...' : '关闭'}
+                </Button>
+              )
             ) : platform === 'kiro' ? (
               // Kiro账号不需要手动提交
               kiroLoginMethod === 'refresh_token' ? (

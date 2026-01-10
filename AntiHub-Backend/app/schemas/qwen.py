@@ -29,3 +29,9 @@ class QwenAccountUpdateNameRequest(BaseModel):
 
     account_name: str = Field(..., description="账号显示名称")
 
+
+class QwenOAuthAuthorizeRequest(BaseModel):
+    """生成 Qwen OAuth（Device Flow）授权链接"""
+
+    is_shared: int = Field(0, description="0=专属账号，1=共享账号")
+    account_name: Optional[str] = Field(None, description="账号显示名称（可选）")

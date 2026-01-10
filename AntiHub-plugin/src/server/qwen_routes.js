@@ -1,6 +1,8 @@
 import express from 'express';
+import crypto from 'crypto';
 import qwenAccountService from '../services/qwen_account.service.js';
 import qwenService from '../services/qwen.service.js';
+import redisService from '../services/redis.service.js';
 import userService from '../services/user.service.js';
 import logger from '../utils/logger.js';
 import config from '../config/config.js';
@@ -59,6 +61,171 @@ function toSafeAccount(account) {
     updated_at: account.updated_at,
   };
 }
+
+const qwenOAuthStateKey = (state) => `qwen_oauth:${state}`;
+
+/**
+ * Qwen OAuth（Device Flow）
+ * POST /api/qwen/oauth/authorize
+ * Body: { is_shared, account_name? }
+ */
+router.post('/api/qwen/oauth/authorize', authenticateApiKey, async (req, res) => {
+  try {
+    if (!redisService.isAvailable()) {
+      return res.status(503).json({ error: 'Redis不可用，无法使用Qwen OAuth登录' });
+    }
+
+    const { is_shared = 0, account_name } = req.body || {};
+    if (is_shared !== 0 && is_shared !== 1) {
+      return res.status(400).json({ error: 'is_shared必须是0或1' });
+    }
+
+    const deviceFlow = await qwenService.initiateDeviceFlow();
+    const state = `qwen-${crypto.randomUUID()}`;
+
+    // 这份 state 仅用于我们自己轮询登录状态，不会发给 Qwen。
+    const ttlSeconds = Math.min(3600, Math.max(300, deviceFlow.expires_in + 120));
+    const stateInfo = {
+      provider: 'qwen',
+      user_id: req.user.user_id,
+      is_shared,
+      account_name: typeof account_name === 'string' ? account_name.trim() : '',
+      created_at: Date.now(),
+      callback_completed: false,
+      completed_at: null,
+      error: null,
+      account_data: null,
+    };
+
+    await redisService.set(qwenOAuthStateKey(state), stateInfo, ttlSeconds);
+
+    // 后台轮询，成功后落库（不把 token 写进 Redis，避免泄漏）
+    void (async () => {
+      try {
+        const tokenData = await qwenService.pollForToken({
+          device_code: deviceFlow.device_code,
+          code_verifier: deviceFlow.code_verifier,
+          interval: deviceFlow.interval,
+        });
+
+        const expiresAt =
+          typeof tokenData.expires_in === 'number'
+            ? Date.now() + tokenData.expires_in * 1000
+            : null;
+
+        const resourceURL = qwenService.normalizeResourceURL(tokenData.resource_url);
+        const email = `qwen-${Date.now()}`;
+        const name = stateInfo.account_name || email || 'Qwen Account';
+
+        const account = await qwenAccountService.createAccount({
+          user_id: stateInfo.user_id,
+          account_name: name,
+          is_shared: stateInfo.is_shared,
+          access_token: tokenData.access_token,
+          refresh_token: typeof tokenData.refresh_token === 'string' ? tokenData.refresh_token.trim() : null,
+          expires_at: expiresAt,
+          last_refresh: new Date().toISOString(),
+          resource_url: resourceURL,
+          email,
+        });
+
+        const safeAccount = toSafeAccount(account);
+        await redisService.set(
+          qwenOAuthStateKey(state),
+          {
+            ...stateInfo,
+            callback_completed: true,
+            completed_at: Date.now(),
+            account_data: safeAccount,
+          },
+          ttlSeconds
+        );
+      } catch (error) {
+        const message = typeof error?.message === 'string' ? error.message : 'Qwen OAuth失败';
+        try {
+          await redisService.set(
+            qwenOAuthStateKey(state),
+            {
+              ...stateInfo,
+              error: message,
+            },
+            ttlSeconds
+          );
+        } catch {
+          // ignore
+        }
+        qwenService.logSafeError(error);
+      }
+    })();
+
+    res.json({
+      success: true,
+      data: {
+        auth_url: deviceFlow.verification_uri_complete,
+        state,
+        expires_in: deviceFlow.expires_in,
+        interval: deviceFlow.interval,
+      },
+    });
+  } catch (error) {
+    logger.error('生成Qwen OAuth登录URL失败:', error.message);
+    res.status(500).json({ error: error.message || '生成Qwen OAuth登录URL失败' });
+  }
+});
+
+/**
+ * 轮询 Qwen OAuth 登录状态
+ * GET /api/qwen/oauth/status/:state
+ * 无需认证（不返回敏感 token），仅用于前端轮询
+ */
+router.get('/api/qwen/oauth/status/:state', async (req, res) => {
+  try {
+    if (!redisService.isAvailable()) {
+      return res.status(503).json({ error: 'Redis不可用，无法查询Qwen OAuth状态' });
+    }
+
+    const { state } = req.params || {};
+    const normalized = typeof state === 'string' ? state.trim() : '';
+    if (!normalized) {
+      return res.status(400).json({ error: '缺少state参数' });
+    }
+
+    const stateInfo = await redisService.get(qwenOAuthStateKey(normalized));
+    if (!stateInfo) {
+      return res.status(404).json({
+        error: '无效或已过期的state参数',
+        status: 'expired',
+      });
+    }
+
+    if (stateInfo.callback_completed) {
+      return res.json({
+        success: true,
+        status: 'completed',
+        data: stateInfo.account_data || null,
+        message: '登录已完成',
+      });
+    }
+
+    if (stateInfo.error) {
+      return res.json({
+        success: false,
+        status: 'failed',
+        error: stateInfo.error,
+        message: '登录失败',
+      });
+    }
+
+    res.json({
+      success: true,
+      status: 'pending',
+      message: '等待用户完成授权...',
+    });
+  } catch (error) {
+    logger.error('查询Qwen OAuth状态失败:', error.message);
+    res.status(500).json({ error: error.message || '查询Qwen OAuth状态失败' });
+  }
+});
 
 /**
  * 导入 QwenCli 导出的 JSON
@@ -255,4 +422,3 @@ router.get('/api/qwen/admin/accounts', authenticateApiKey, requireAdmin, async (
 });
 
 export default router;
-

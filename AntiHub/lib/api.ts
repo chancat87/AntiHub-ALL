@@ -1686,6 +1686,57 @@ export async function pollKiroOAuthStatus(state: string): Promise<{
 
 // ==================== Qwen 账号管理相关 API ====================
 
+/**
+ * 生成 Qwen OAuth（Device Flow）登录链接
+ */
+export async function getQwenOAuthAuthorizeUrl(
+  isShared: number = 0,
+  accountName?: string
+): Promise<{
+  success: boolean;
+  data: {
+    auth_url: string;
+    state: string;
+    expires_in: number;
+    interval?: number;
+  };
+}> {
+  return fetchWithAuth<{
+    success: boolean;
+    data: {
+      auth_url: string;
+      state: string;
+      expires_in: number;
+      interval?: number;
+    };
+  }>(`${API_BASE_URL}/api/qwen/oauth/authorize`, {
+    method: 'POST',
+    body: JSON.stringify({
+      is_shared: isShared,
+      account_name: accountName,
+    }),
+  });
+}
+
+/**
+ * 轮询 Qwen OAuth 登录状态
+ */
+export async function pollQwenOAuthStatus(state: string): Promise<{
+  success: boolean;
+  status: 'pending' | 'completed' | 'failed' | 'expired';
+  message?: string;
+  data?: any;
+  error?: any;
+}> {
+  return fetchWithAuth<{
+    success: boolean;
+    status: 'pending' | 'completed' | 'failed' | 'expired';
+    message?: string;
+    data?: any;
+    error?: any;
+  }>(`${API_BASE_URL}/api/qwen/oauth/status/${state}`, { method: 'GET' });
+}
+
 export interface QwenAccount {
   account_id: string;
   user_id: string;

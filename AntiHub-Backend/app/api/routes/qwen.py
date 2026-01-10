@@ -16,6 +16,7 @@ from app.schemas.qwen import (
     QwenAccountImportRequest,
     QwenAccountUpdateStatusRequest,
     QwenAccountUpdateNameRequest,
+    QwenOAuthAuthorizeRequest,
 )
 
 
@@ -29,6 +30,69 @@ def _raise_upstream_http_error(e: httpx.HTTPStatusError):
     else:
         detail = error_data
     raise HTTPException(status_code=e.response.status_code, detail=detail)
+
+
+@router.post(
+    "/oauth/authorize",
+    summary="生成 Qwen OAuth 登录链接",
+    description="使用 Qwen OAuth Device Flow 生成授权链接，并由 plug-in 在后台轮询完成登录后落库。",
+)
+async def qwen_oauth_authorize(
+    request: QwenOAuthAuthorizeRequest,
+    current_user: User = Depends(get_current_user),
+    service: PluginAPIService = Depends(get_plugin_api_service),
+):
+    try:
+        if request.is_shared not in (0, 1):
+            raise ValueError("is_shared 必须是 0 或 1")
+        result = await service.proxy_request(
+            user_id=current_user.id,
+            method="POST",
+            path="/api/qwen/oauth/authorize",
+            json_data={
+                "is_shared": request.is_shared,
+                "account_name": request.account_name,
+            },
+        )
+        return result
+    except httpx.HTTPStatusError as e:
+        _raise_upstream_http_error(e)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="生成 Qwen OAuth 登录链接失败",
+        )
+
+
+@router.get(
+    "/oauth/status/{state}",
+    summary="轮询 Qwen OAuth 登录状态",
+    description="轮询 plug-in 内部的 Qwen OAuth 登录状态，不返回敏感 token。",
+)
+async def qwen_oauth_status(
+    state: str,
+    current_user: User = Depends(get_current_user),
+    service: PluginAPIService = Depends(get_plugin_api_service),
+):
+    try:
+        if not state or not state.strip():
+            raise ValueError("state 不能为空")
+        return await service.proxy_request(
+            user_id=current_user.id,
+            method="GET",
+            path=f"/api/qwen/oauth/status/{state.strip()}",
+        )
+    except httpx.HTTPStatusError as e:
+        _raise_upstream_http_error(e)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="查询 Qwen OAuth 登录状态失败",
+        )
 
 
 @router.post(
@@ -200,4 +264,3 @@ async def delete_qwen_account(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="删除 Qwen 账号失败",
         )
-
