@@ -16,7 +16,7 @@
 1. Antigravity：已完全支持
 2. Kiro-OAuth(GitHub/Google): 已完全支持
 3. Kiro-Token: 已完全支持
-4. Kiro-AWS IMA: 开发中
+4. Kiro-AWS IMA: 测试结果成功导入
 5. QwenCli: 已完成开发，待测试
 
 
@@ -73,3 +73,4 @@ docker compose run --rm backend python generate_encryption_key.py
 - [Antigravity-Manager](https://github.com/lbjlaq/Antigravity-Manager) - 提供AN渠道的Token导入代码
 - [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) - 提供了AN渠道的429修复
 - [KiroGate](https://github.com/aliom-v/KiroGate) - Kiro渠道的Token导入、思考支持
+- [AIClient-2-API](https://github.com/justlovemaki/AIClient-2-API) - Kiro AWS IMA账户导入代码
