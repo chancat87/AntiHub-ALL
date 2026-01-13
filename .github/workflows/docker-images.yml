@@ -181,7 +181,7 @@ jobs:
           context: ./AntiHub
           file: ./AntiHub/Dockerfile
           push: true
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta_web.outputs.tags }}
           labels: ${{ steps.meta_web.outputs.labels }}
           cache-from: type=gha,scope=web
@@ -230,7 +230,7 @@ jobs:
           context: ./AntiHub-Backend
           file: ./AntiHub-Backend/Dockerfile
           push: true
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta_backend.outputs.tags }}
           labels: ${{ steps.meta_backend.outputs.labels }}
           cache-from: type=gha,scope=backend
@@ -279,7 +279,7 @@ jobs:
           context: ./AntiHub-plugin
           file: ./AntiHub-plugin/Dockerfile
           push: true
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta_plugin.outputs.tags }}
           labels: ${{ steps.meta_plugin.outputs.labels }}
           cache-from: type=gha,scope=plugin

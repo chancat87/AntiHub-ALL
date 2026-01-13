@@ -1,5 +1,6 @@
 services:
   web:
+    # 国内请使用：swr.cn-north-4.myhuaweicloud.com/ddn-k8s/ghcr.io/zhongruan0522/antihub-web:latest
     image: ghcr.io/${IMAGE_OWNER:-zhongruan0522}/antihub-web:${IMAGE_TAG:-latest}
     container_name: antihub-web
     environment:
@@ -16,6 +17,7 @@ services:
     restart: unless-stopped
 
   backend:
+    # 国内请使用：swr.cn-north-4.myhuaweicloud.com/ddn-k8s/ghcr.io/zhongruan0522/antihub-backend:latest
     image: ghcr.io/${IMAGE_OWNER:-zhongruan0522}/antihub-backend:${IMAGE_TAG:-latest}
     container_name: antihub-backend
     environment:
@@ -55,6 +57,7 @@ services:
     restart: unless-stopped
 
   plugin:
+    # 国内请使用：swr.cn-north-4.myhuaweicloud.com/ddn-k8s/ghcr.io/zhongruan0522/antihub-plugin:latest
     image: ghcr.io/${IMAGE_OWNER:-zhongruan0522}/antihub-plugin:${IMAGE_TAG:-latest}
     container_name: antihub-plugin
     environment:
