@@ -896,7 +896,9 @@ router.post('/v1/kiro/chat/completions', authenticateApiKey, async (req, res) =>
     let keepAliveTimer = null;
 
     try {
-      // 先尝试获取账号，如果失败则返回错误状态码
+      // 先尝试获取账号（能提前拦截“该订阅层不可用此模型”，避免先返回200的SSE）
+      const preselectedAccount = await kiroClient.getAvailableAccount(req.user.user_id, [], model);
+
       // 设置流式响应头
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
@@ -1009,7 +1011,7 @@ router.post('/v1/kiro/chat/completions', authenticateApiKey, async (req, res) =>
           logger.warn(`Kiro写入响应失败: ${writeError.message}`);
           responseEnded = true;
         }
-      }, req.user.user_id, options);
+      }, req.user.user_id, options, preselectedAccount);
 
       // 如果响应已结束，直接返回
       if (responseEnded) {
@@ -1060,25 +1062,39 @@ router.post('/v1/kiro/chat/completions', authenticateApiKey, async (req, res) =>
       // 根据错误类型返回适当的状态码
       let statusCode = 500;
       let errorMessage = error.message;
+      let errorType = 'api_error';
       
-      // 检查是否是配额耗尽或无可用账号的错误
-      if (error.message.includes('没有可用的Kiro账号') ||
+      // 订阅层无可用账号支持该模型
+      const modelNotAllowedMarker = '没有可用的Kiro账号可用于模型:';
+      if (typeof error.message === 'string' && error.message.includes(modelNotAllowedMarker)) {
+        statusCode = 403; // Forbidden
+        const modelId = error.message
+          .split(modelNotAllowedMarker)[1]
+          ?.split('（')[0]
+          ?.trim();
+        errorMessage = modelId ? `无可用账号可用于模型: ${modelId}` : '无可用账号可用于所选模型';
+        errorType = 'model_not_allowed';
+      }
+      // 配额耗尽或无可用账号（非模型权限问题）
+      else if (error.message.includes('没有可用的Kiro账号') ||
           error.message.includes('配额') ||
           error.message.includes('quota') ||
           error.message.includes('limit')) {
         statusCode = 429; // Too Many Requests
         errorMessage = '所有账号配额已耗尽，请稍后再试';
+        errorType = 'insufficient_quota';
       } else if (error.message.includes('认证') ||
                  error.message.includes('授权') ||
                  error.message.includes('token')) {
         statusCode = 401; // Unauthorized
+        errorType = 'authentication_error';
       }
       
       // 对于流式响应，如果还没有发送响应头，则设置状态码
       if (!res.headersSent) {
         res.status(statusCode).json({
           error: errorMessage,
-          type: statusCode === 429 ? 'insufficient_quota' : 'api_error'
+          type: errorType
         });
       } else {
         // 如果已经开始发送流式数据，则在流中发送错误信息
@@ -1179,8 +1195,19 @@ router.post('/v1/kiro/chat/completions', authenticateApiKey, async (req, res) =>
       let errorMessage = error.message;
       let errorType = 'api_error';
       
-      // 检查是否是配额耗尽或无可用账号的错误
-      if (error.message.includes('没有可用的Kiro账号') ||
+      // 订阅层无可用账号支持该模型
+      const modelNotAllowedMarker = '没有可用的Kiro账号可用于模型:';
+      if (typeof error.message === 'string' && error.message.includes(modelNotAllowedMarker)) {
+        statusCode = 403; // Forbidden
+        const modelId = error.message
+          .split(modelNotAllowedMarker)[1]
+          ?.split('（')[0]
+          ?.trim();
+        errorMessage = modelId ? `无可用账号可用于模型: ${modelId}` : '无可用账号可用于所选模型';
+        errorType = 'model_not_allowed';
+      }
+      // 配额耗尽或无可用账号（非模型权限问题）
+      else if (error.message.includes('没有可用的Kiro账号') ||
           error.message.includes('配额') ||
           error.message.includes('quota') ||
           error.message.includes('limit')) {

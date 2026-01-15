@@ -86,9 +86,10 @@ class KiroClient {
    * @param {Function} callback - 回调函数
    * @param {string} user_id - 用户ID
    * @param {Object} options - 其他选项
+   * @param {Object|null} accountOverride - 可选：指定账号（避免重复选择）
    */
-  async generateResponse(messages, model, callback, user_id, options = {}) {
-    const account = await this.getAvailableAccount(user_id, [], model);
+  async generateResponse(messages, model, callback, user_id, options = {}, accountOverride = null) {
+    const account = accountOverride || await this.getAvailableAccount(user_id, [], model);
     const requestId = crypto.randomUUID().substring(0, 8);
     
     logger.info(`[${requestId}] 开始Kiro请求: model=${model}, user_id=${user_id}, account_id=${account.account_id}`);
