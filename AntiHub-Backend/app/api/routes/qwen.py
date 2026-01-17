@@ -179,6 +179,31 @@ async def get_qwen_account(
         )
 
 
+@router.get(
+    "/accounts/{account_id}/credentials",
+    summary="导出 Qwen 凭证",
+    description="导出指定 Qwen 账号保存的凭证信息（敏感），用于前端复制为 JSON",
+)
+async def get_qwen_account_credentials(
+    account_id: str,
+    current_user: User = Depends(get_current_user),
+    service: PluginAPIService = Depends(get_plugin_api_service),
+):
+    try:
+        return await service.proxy_request(
+            user_id=current_user.id,
+            method="GET",
+            path=f"/api/qwen/accounts/{account_id}/credentials",
+        )
+    except httpx.HTTPStatusError as e:
+        _raise_upstream_http_error(e)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="导出 Qwen 凭证失败",
+        )
+
+
 @router.put(
     "/accounts/{account_id}/status",
     summary="更新 Qwen 账号状态",

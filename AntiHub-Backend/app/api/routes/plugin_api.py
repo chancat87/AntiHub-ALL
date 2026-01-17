@@ -236,6 +236,35 @@ async def get_account(
 
 
 @router.get(
+    "/accounts/{cookie_id}/credentials",
+    summary="导出账号凭证",
+    description="导出指定账号保存的凭证信息（敏感），用于前端复制为 JSON"
+)
+async def get_account_credentials(
+    cookie_id: str,
+    current_user: User = Depends(get_current_user),
+    service: PluginAPIService = Depends(get_plugin_api_service),
+):
+    """导出账号凭证（敏感信息）"""
+    try:
+        return await service.get_account_credentials(current_user.id, cookie_id)
+    except httpx.HTTPStatusError as e:
+        error_data = getattr(e, "response_data", {"detail": str(e)})
+        if isinstance(error_data, dict):
+            detail = error_data.get("detail") or error_data.get("error") or error_data
+        else:
+            detail = error_data
+        raise HTTPException(status_code=e.response.status_code, detail=detail)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="导出账号凭证失败",
+        )
+
+
+@router.get(
     "/accounts/{cookie_id}/detail",
     summary="获取账号详情",
     description="获取指定账号的邮箱、订阅层级、导入时间等信息"

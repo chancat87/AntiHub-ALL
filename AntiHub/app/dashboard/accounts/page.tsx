@@ -8,14 +8,17 @@ import {
   updateAccountName,
   refreshAccount,
   getAccountQuotas,
+  getAccountCredentials,
   getAntigravityAccountDetail,
   updateQuotaStatus,
   getKiroAccounts,
+  getKiroAccountCredentials,
   deleteKiroAccount,
   updateKiroAccountStatus,
   updateKiroAccountName,
   getKiroAccountBalance,
   getQwenAccounts,
+  getQwenAccountCredentials,
   deleteQwenAccount,
   updateQwenAccountStatus,
   updateQwenAccountName,
@@ -63,7 +66,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Tooltip } from '@/components/ui/tooltip-card';
-import { IconCirclePlusFilled, IconDotsVertical, IconRefresh, IconTrash, IconToggleLeft, IconToggleRight, IconExternalLink, IconChartBar, IconEdit, IconAlertTriangle } from '@tabler/icons-react';
+import { IconCirclePlusFilled, IconDotsVertical, IconRefresh, IconTrash, IconToggleLeft, IconToggleRight, IconExternalLink, IconChartBar, IconEdit, IconAlertTriangle, IconCopy } from '@tabler/icons-react';
 import {
   Select,
   SelectContent,
@@ -270,6 +273,69 @@ export default function AccountsPage() {
       });
     } finally {
       setRefreshingCookieId(null);
+    }
+  };
+
+  const handleCopyJson = async (data: Record<string, any>) => {
+    const text = JSON.stringify(data);
+    if (!text || text === '{}') {
+      toasterRef.current?.show({
+        title: '复制失败',
+        message: '没有可导出的凭证字段',
+        variant: 'error',
+        position: 'top-right',
+      });
+      return;
+    }
+
+    await navigator.clipboard.writeText(text);
+    toasterRef.current?.show({
+      title: '复制成功',
+      message: '凭证JSON已复制到剪贴板',
+      variant: 'success',
+      position: 'top-right',
+    });
+  };
+
+  const handleCopyAntigravityCredentials = async (account: Account) => {
+    try {
+      const data = await getAccountCredentials(account.cookie_id);
+      await handleCopyJson(data);
+    } catch (err) {
+      toasterRef.current?.show({
+        title: '复制失败',
+        message: err instanceof Error ? err.message : '复制凭证失败',
+        variant: 'error',
+        position: 'top-right',
+      });
+    }
+  };
+
+  const handleCopyKiroCredentials = async (account: KiroAccount) => {
+    try {
+      const data = await getKiroAccountCredentials(account.account_id);
+      await handleCopyJson(data);
+    } catch (err) {
+      toasterRef.current?.show({
+        title: '复制失败',
+        message: err instanceof Error ? err.message : '复制凭证失败',
+        variant: 'error',
+        position: 'top-right',
+      });
+    }
+  };
+
+  const handleCopyQwenCredentials = async (account: QwenAccount) => {
+    try {
+      const data = await getQwenAccountCredentials(account.account_id);
+      await handleCopyJson(data);
+    } catch (err) {
+      toasterRef.current?.show({
+        title: '复制失败',
+        message: err instanceof Error ? err.message : '复制凭证失败',
+        variant: 'error',
+        position: 'top-right',
+      });
     }
   };
 
@@ -909,8 +975,12 @@ export default function AccountsPage() {
                                      详细信息
                                    </DropdownMenuItem>
                                    <DropdownMenuItem onClick={() => handleViewQuotas(account)}>
-                                    <IconChartBar className="size-4 mr-2" />
+                                   <IconChartBar className="size-4 mr-2" />
                                     查看配额
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem onClick={() => handleCopyAntigravityCredentials(account)}>
+                                    <IconCopy className="size-4 mr-2" />
+                                    复制凭证为JSON
                                   </DropdownMenuItem>
                                   <DropdownMenuItem
                                     onClick={() => handleRefreshAntigravityAccount(account)}
@@ -1018,6 +1088,10 @@ export default function AccountsPage() {
                                   <IconChartBar className="size-4 mr-2" />
                                   详细信息
                                 </DropdownMenuItem>
+                                <DropdownMenuItem onClick={() => handleCopyKiroCredentials(account)}>
+                                  <IconCopy className="size-4 mr-2" />
+                                  复制凭证为JSON
+                                </DropdownMenuItem>
                                 <DropdownMenuItem onClick={() => handleRenameKiro(account)}>
                                   <IconEdit className="size-4 mr-2" />
                                   重命名
@@ -1123,6 +1197,10 @@ export default function AccountsPage() {
                                 </Button>
                               </DropdownMenuTrigger>
                               <DropdownMenuContent align="end">
+                                <DropdownMenuItem onClick={() => handleCopyQwenCredentials(account)}>
+                                  <IconCopy className="size-4 mr-2" />
+                                  复制凭证为JSON
+                                </DropdownMenuItem>
                                 <DropdownMenuItem onClick={() => handleRenameQwen(account)}>
                                   <IconEdit className="size-4 mr-2" />
                                   重命名

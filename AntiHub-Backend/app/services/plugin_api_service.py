@@ -527,6 +527,20 @@ class PluginAPIService:
             path=f"/api/accounts/{cookie_id}"
         )
 
+    async def get_account_credentials(self, user_id: int, cookie_id: str) -> Dict[str, Any]:
+        """
+        导出账号凭证（敏感信息）
+
+        说明：
+        - 仅用于用户自助导出/备份（前端“复制凭证为JSON”）
+        - 实际鉴权在 plug-in API 层完成（仅账号所有者/管理员可访问）
+        """
+        return await self.proxy_request(
+            user_id=user_id,
+            method="GET",
+            path=f"/api/accounts/{cookie_id}/credentials",
+        )
+
     async def get_account_detail(self, user_id: int, cookie_id: str) -> Dict[str, Any]:
         """获取单个账号的详情信息（邮箱/订阅层级等）"""
         return await self.proxy_request(

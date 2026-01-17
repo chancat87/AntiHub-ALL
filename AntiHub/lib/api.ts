@@ -627,6 +627,18 @@ export async function getAccount(cookieId: string): Promise<Account> {
 }
 
 /**
+ * 导出账号凭证（敏感信息）
+ * 用于前端“复制凭证为JSON”
+ */
+export async function getAccountCredentials(cookieId: string): Promise<Record<string, any>> {
+  const result = await fetchWithAuth<{ success: boolean; data: Record<string, any> }>(
+    `${API_BASE_URL}/api/plugin-api/accounts/${cookieId}/credentials`,
+    { method: 'GET' }
+  );
+  return result.data;
+}
+
+/**
  * 删除账号
  */
 export interface AntigravityAccountDetail {
@@ -1566,6 +1578,18 @@ export async function getKiroAccount(accountId: string): Promise<KiroAccount> {
 }
 
 /**
+ * 导出Kiro账号凭证（敏感信息）
+ * 用于前端“复制凭证为JSON”
+ */
+export async function getKiroAccountCredentials(accountId: string): Promise<Record<string, any>> {
+  const result = await fetchWithAuth<{ success: boolean; data: Record<string, any> }>(
+    `${API_BASE_URL}/api/kiro/accounts/${accountId}/credentials`,
+    { method: 'GET' }
+  );
+  return result.data;
+}
+
+/**
  * 更新Kiro账号状态
  */
 export async function updateKiroAccountStatus(accountId: string, status: number): Promise<any> {
@@ -1852,6 +1876,18 @@ export async function getQwenAccounts(): Promise<QwenAccount[]> {
 export async function getQwenAccount(accountId: string): Promise<QwenAccount> {
   const result = await fetchWithAuth<{ success: boolean; data: QwenAccount }>(
     `${API_BASE_URL}/api/qwen/accounts/${accountId}`,
+    { method: 'GET' }
+  );
+  return result.data;
+}
+
+/**
+ * 导出Qwen账号凭证（敏感信息）
+ * 用于前端“复制凭证为JSON”
+ */
+export async function getQwenAccountCredentials(accountId: string): Promise<Record<string, any>> {
+  const result = await fetchWithAuth<{ success: boolean; data: Record<string, any> }>(
+    `${API_BASE_URL}/api/qwen/accounts/${accountId}/credentials`,
     { method: 'GET' }
   );
   return result.data;

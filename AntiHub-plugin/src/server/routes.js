@@ -569,6 +569,53 @@ router.get('/api/accounts/:cookie_id', authenticateApiKey, async (req, res) => {
 });
 
 /**
+ * 导出账号凭证（敏感信息）
+ * GET /api/accounts/:cookie_id/credentials
+ *
+ * 说明：
+ * - 仅账号所有者/管理员可访问
+ * - 用于前端“复制凭证为JSON”
+ */
+router.get('/api/accounts/:cookie_id/credentials', authenticateApiKey, async (req, res) => {
+  try {
+    const { cookie_id } = req.params;
+    const account = await accountService.getAccountByCookieId(cookie_id);
+
+    if (!account) {
+      return res.status(404).json({ error: '账号不存在' });
+    }
+
+    // 检查权限（只能查看自己的账号，管理员可以查看所有）
+    if (!req.isAdmin && account.user_id !== req.user.user_id) {
+      return res.status(403).json({ error: '无权访问此账号' });
+    }
+
+    const credentials = {
+      type: 'antigravity',
+      cookie_id: account.cookie_id,
+      is_shared: account.is_shared,
+      access_token: account.access_token,
+      refresh_token: account.refresh_token,
+      expires_at: account.expires_at,
+    };
+
+    // 过滤空值，避免导出无意义字段（0/false 需要保留）
+    const exportData = Object.fromEntries(
+      Object.entries(credentials).filter(([, value]) => {
+        if (value === null || value === undefined) return false;
+        if (typeof value === 'string' && value.trim() === '') return false;
+        return true;
+      })
+    );
+
+    res.json({ success: true, data: exportData });
+  } catch (error) {
+    logger.error('导出账号凭证失败:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * 手动刷新账号（强制刷新 access_token + 更新 project_id_0）
  * POST /api/accounts/:cookie_id/refresh
  */

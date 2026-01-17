@@ -488,6 +488,56 @@ router.get('/api/kiro/accounts/:account_id', authenticateApiKey, async (req, res
 });
 
 /**
+ * 导出Kiro账号凭证（敏感信息）
+ * GET /api/kiro/accounts/:account_id/credentials
+ *
+ * 说明：
+ * - 仅账号所有者/管理员可访问
+ * - 用于前端“复制凭证为JSON”
+ */
+router.get('/api/kiro/accounts/:account_id/credentials', authenticateApiKey, async (req, res) => {
+  try {
+    const { account_id } = req.params;
+    const account = await kiroAccountService.getAccountById(account_id);
+
+    if (!account) {
+      return res.status(404).json({ error: 'Kiro账号不存在' });
+    }
+
+    if (!req.isAdmin && account.user_id !== req.user.user_id) {
+      return res.status(403).json({ error: '无权访问此账号' });
+    }
+
+    const credentials = {
+      type: 'kiro',
+      auth_method: account.auth_method,
+      refresh_token: account.refresh_token,
+      access_token: account.access_token,
+      expires_at: account.expires_at,
+      client_id: account.client_id,
+      client_secret: account.client_secret,
+      machineid: account.machineid,
+      profile_arn: account.profile_arn,
+      userid: account.userid,
+      is_shared: account.is_shared,
+    };
+
+    const exportData = Object.fromEntries(
+      Object.entries(credentials).filter(([, value]) => {
+        if (value === null || value === undefined) return false;
+        if (typeof value === 'string' && value.trim() === '') return false;
+        return true;
+      })
+    );
+
+    res.json({ success: true, data: exportData });
+  } catch (error) {
+    logger.error('导出Kiro账号凭证失败:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * 更新Kiro账号状态
  * PUT /api/kiro/accounts/:account_id/status
  * Body: { status }

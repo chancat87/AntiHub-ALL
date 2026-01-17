@@ -316,6 +316,34 @@ async def get_account(
         )
 
 
+@router.get(
+    "/accounts/{account_id}/credentials",
+    summary="导出账号凭证",
+    description="导出指定Kiro账号保存的凭证信息（敏感），用于前端复制为 JSON",
+)
+async def get_account_credentials(
+    account_id: str,
+    current_user: User = Depends(get_current_user),
+    service: KiroService = Depends(get_kiro_service),
+):
+    """导出Kiro账号凭证（敏感信息）"""
+    try:
+        return await service.get_account_credentials(current_user.id, account_id)
+    except UpstreamAPIError as e:
+        return JSONResponse(
+            status_code=e.status_code,
+            content={
+                "error": e.extracted_message,
+                "type": "api_error",
+            },
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"导出账号凭证失败: {str(e)}",
+        )
+
+
 @router.put(
     "/accounts/{account_id}/status",
     summary="更新账号状态",
