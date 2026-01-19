@@ -32,21 +32,10 @@ class ProjectService {
   }
 
   getApiEndpoints() {
-    const endpoints = Array.isArray(config?.api?.endpoints) ? config.api.endpoints : [];
-    if (endpoints.length > 0) {
-      return endpoints
-        .map((endpoint) => ({
-          baseUrl: endpoint?.baseUrl,
-          host: endpoint?.host,
-        }))
-        .filter((endpoint) => typeof endpoint.baseUrl === 'string' && endpoint.baseUrl && typeof endpoint.host === 'string' && endpoint.host);
-    }
-
-    // fallback: keep behavior consistent with default config
     return [
       {
-        baseUrl: 'https://daily-cloudcode-pa.sandbox.googleapis.com',
-        host: 'daily-cloudcode-pa.sandbox.googleapis.com',
+        baseUrl: 'https://cloudcode-pa.googleapis.com',
+        host: 'cloudcode-pa.googleapis.com',
       },
     ];
   }
