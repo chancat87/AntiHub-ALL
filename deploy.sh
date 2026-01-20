@@ -38,7 +38,13 @@ check_command() {
 
 # 生成随机密钥
 generate_random_key() {
-    openssl rand -hex 32
+    if command -v openssl &> /dev/null; then
+        openssl rand -hex 32
+        return
+    fi
+
+    # 仅装了 Docker 的环境：用容器生成随机值，避免依赖宿主机 openssl
+    docker run --rm python:3.11-alpine python -c "import secrets; print(secrets.token_hex(32))"
 }
 
 # 生成 Fernet 密钥（用于 PLUGIN_API_ENCRYPTION_KEY）
@@ -90,7 +96,9 @@ main() {
     # 1. 检查依赖
     log_info "检查系统依赖..."
     check_command docker
-    check_command openssl
+    if ! command -v openssl &> /dev/null; then
+        log_warn "openssl 未安装，将用 Docker 生成随机密钥（可能会额外拉取 python:3.11-alpine 镜像）"
+    fi
 
     # 检测 docker compose 命令（优先使用新版本）
     if docker compose version &> /dev/null; then
@@ -224,8 +232,9 @@ main() {
 
     # 检查 PostgreSQL 健康状态
     log_info "检查 PostgreSQL 状态..."
+    POSTGRES_USER_CHECK=$(grep "^POSTGRES_USER=" .env | cut -d'=' -f2 || echo "antihub")
     for i in {1..30}; do
-        if $DOCKER_COMPOSE exec -T postgres pg_isready -U antihub &> /dev/null; then
+        if $DOCKER_COMPOSE exec -T postgres pg_isready -U "$POSTGRES_USER_CHECK" &> /dev/null; then
             log_info "PostgreSQL 已就绪"
             break
         fi
@@ -235,6 +244,55 @@ main() {
         fi
         sleep 2
     done
+
+    # 确保 Plugin 数据库/用户已正确初始化（避免只改端口/重写 .env 后出现密码不一致）
+    log_info "同步 PostgreSQL 中的 plugin 数据库/用户..."
+    POSTGRES_USER_ENV=$(grep "^POSTGRES_USER=" .env | cut -d'=' -f2 || echo "antihub")
+    POSTGRES_PASSWORD_ENV=$(grep "^POSTGRES_PASSWORD=" .env | cut -d'=' -f2- || echo "please-change-me")
+    PLUGIN_DB_NAME_ENV=$(grep "^PLUGIN_DB_NAME=" .env | cut -d'=' -f2 || echo "antigravity")
+    PLUGIN_DB_USER_ENV=$(grep "^PLUGIN_DB_USER=" .env | cut -d'=' -f2 || echo "antigravity")
+    PLUGIN_DB_PASSWORD_ENV=$(grep "^PLUGIN_DB_PASSWORD=" .env | cut -d'=' -f2- || echo "please-change-me")
+
+    $DOCKER_COMPOSE exec -T postgres psql -v ON_ERROR_STOP=1 \
+        -U "$POSTGRES_USER_ENV" -d postgres \
+        -v su_user="$POSTGRES_USER_ENV" -v su_pass="$POSTGRES_PASSWORD_ENV" \
+        -v plugin_db="$PLUGIN_DB_NAME_ENV" -v plugin_user="$PLUGIN_DB_USER_ENV" -v plugin_pass="$PLUGIN_DB_PASSWORD_ENV" <<-'EOSQL'
+DO $$
+BEGIN
+    -- 让数据库里的密码与 .env 保持一致（覆盖式配置也能正常连上旧数据卷）
+    EXECUTE format('ALTER USER %I WITH PASSWORD %L', :'su_user', :'su_pass');
+
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'plugin_user') THEN
+        EXECUTE format('CREATE USER %I WITH PASSWORD %L', :'plugin_user', :'plugin_pass');
+    ELSE
+        EXECUTE format('ALTER USER %I WITH PASSWORD %L', :'plugin_user', :'plugin_pass');
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'plugin_db') THEN
+        EXECUTE format('CREATE DATABASE %I OWNER %I', :'plugin_db', :'plugin_user');
+    ELSE
+        EXECUTE format('ALTER DATABASE %I OWNER TO %I', :'plugin_db', :'plugin_user');
+    END IF;
+
+    EXECUTE format('GRANT ALL PRIVILEGES ON DATABASE %I TO %I', :'plugin_db', :'plugin_user');
+END $$;
+EOSQL
+
+    $DOCKER_COMPOSE exec -T postgres psql -v ON_ERROR_STOP=1 \
+        -U "$POSTGRES_USER_ENV" -d "$PLUGIN_DB_NAME_ENV" \
+        -v plugin_user="$PLUGIN_DB_USER_ENV" <<-'EOSQL'
+DO $$
+BEGIN
+    EXECUTE format('GRANT ALL ON SCHEMA public TO %I', :'plugin_user');
+    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO %I', :'plugin_user');
+    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO %I', :'plugin_user');
+END $$;
+
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA public;
+EOSQL
+
+    # 如果 plugin/backend 因为数据库密码/库不存在启动失败，这里统一重启一次
+    $DOCKER_COMPOSE restart plugin backend &> /dev/null || true
 
     # 检查服务状态
     log_info "检查服务状态..."

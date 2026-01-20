@@ -18,13 +18,47 @@ echo "检查数据库初始化状态..."
 # 构建数据库连接字符串
 PGHOST="${DB_HOST:-localhost}"
 PGPORT="${DB_PORT:-5432}"
-PGDATABASE="${DB_NAME:-antigv}"
+PGDATABASE="${DB_NAME:-antigravity}"
 PGUSER="${DB_USER:-postgres}"
 PGPASSWORD="${DB_PASSWORD:-postgres}"
 export PGHOST PGPORT PGDATABASE PGUSER PGPASSWORD
 
+# 如果你用的是本项目 docker-compose.yml 自带 postgres，容器内端口永远是 5432（别跟宿主机映射端口混了）
+if [ "$PGHOST" = "postgres" ] && [ "$PGPORT" != "5432" ]; then
+    echo "⚠️  检测到 DB_HOST=postgres 但 DB_PORT=$PGPORT；容器内连接 postgres 应使用 5432，将回退为 5432"
+    PGPORT="5432"
+    export PGPORT
+fi
+
+# 等待数据库可连接（避免启动时序导致误判）
+i=0
+last_err=""
+while [ $i -lt 30 ]; do
+    out=$(psql -tAc "SELECT 1" 2>&1)
+    if [ $? -eq 0 ]; then
+        last_err=""
+        break
+    fi
+    last_err="$out"
+    i=$((i + 1))
+    sleep 2
+done
+
+if [ -n "$last_err" ]; then
+    echo "❌ 无法连接数据库：${PGHOST}:${PGPORT}/${PGDATABASE}（user=${PGUSER}）"
+    echo "$last_err"
+    exit 1
+fi
+
 # 检查 users 表是否存在
-TABLE_EXISTS=$(psql -tAc "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'users');") 2>/dev/null
+table_exists_out=$(psql -tAc "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'users');" 2>&1)
+if [ $? -ne 0 ]; then
+    echo "❌ 无法检查数据库初始化状态："
+    echo "$table_exists_out"
+    exit 1
+fi
+
+TABLE_EXISTS=$(echo "$table_exists_out" | tr -d '[:space:]')
 
 if [ "$TABLE_EXISTS" = "t" ]; then
     echo "✅ 数据库已初始化（users 表已存在）"
@@ -32,10 +66,12 @@ else
     echo "📊 数据库未初始化，开始导入 schema.sql..."
 
     if [ -f "$SCHEMA_FILE" ]; then
-        if psql -f "$SCHEMA_FILE" 2>/dev/null; then
+        schema_out=$(psql -v ON_ERROR_STOP=1 -f "$SCHEMA_FILE" 2>&1)
+        if [ $? -eq 0 ]; then
             echo "✅ 数据库初始化成功！"
         else
             echo "❌ 数据库初始化失败！请检查数据库连接和配置。"
+            echo "$schema_out"
             echo "如果数据库还未创建，请先创建数据库："
             echo "  CREATE DATABASE $PGDATABASE;"
             exit 1
@@ -64,7 +100,7 @@ if ! (cat > "$CONFIG_FILE" << EOF
   "database": {
     "host": "${DB_HOST:-localhost}",
     "port": ${DB_PORT:-5432},
-    "database": "${DB_NAME:-antigv}",
+    "database": "${DB_NAME:-antigravity}",
     "user": "${DB_USER:-postgres}",
     "password": "${DB_PASSWORD:-postgres}",
     "max": 20,
