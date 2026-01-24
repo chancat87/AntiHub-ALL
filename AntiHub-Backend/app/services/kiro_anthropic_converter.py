@@ -70,6 +70,10 @@ class KiroAnthropicConverter:
             else:
                 history.append(cls._convert_assistant_history_message(msg))
 
+        # Kiro 对 tool_use/tool_result 的配对非常严格：history 里如果出现孤立/重复的 tool_result，会直接 400。
+        # 参考 kiro.rs：对 tool_result 做配对过滤；但我们额外把“被过滤掉的 tool_result 内容”降级为纯文本，避免信息丢失。
+        cls._sanitize_history_tool_pairing(history)
+
         # 3) Kiro 约束兜底：history 里出现过的工具名，必须在 currentMessage.tools 有定义
         history_tool_names = cls._collect_history_tool_names(history)
         cls._ensure_tool_definitions(tools, history_tool_names)
@@ -81,6 +85,9 @@ class KiroAnthropicConverter:
         # 5) 过滤 tool_use/tool_result 的配对，避免孤立/重复导致 Kiro 400
         validated_tool_results = cls._validate_tool_pairing(history, current_tool_results)
 
+        # 如果 tool_result 被过滤（孤立/重复），把它的内容降级拼到用户文本里，避免 currentMessage 变成空内容。
+        current_text = cls._append_orphan_tool_result_text(current_text, current_tool_results, validated_tool_results)
+
         user_context: Dict[str, Any] = {}
         if tools:
             user_context["tools"] = tools
@@ -90,6 +97,10 @@ class KiroAnthropicConverter:
         # 保守兜底：仅提供 tools 但内容为空时，给一个极短占位符，避免上游判定请求不规范
         if not current_text and not current_images and tools and not validated_tool_results:
             current_text = "执行工具任务"
+
+        # 再兜底一次：避免发出完全空的 currentMessage（某些上游会直接判定 Improperly formed request）
+        if not current_text and not current_images and not validated_tool_results:
+            current_text = "OK"
 
         conversation_state = {
             "agentContinuationId": agent_continuation_id,
@@ -411,6 +422,134 @@ class KiroAnthropicConverter:
             assistant["toolUses"] = tool_uses
         return {"assistantResponseMessage": assistant}
 
+    @staticmethod
+    def _tool_result_to_text(tool_result: Dict[str, Any]) -> str:
+        content = tool_result.get("content")
+        if isinstance(content, list):
+            parts: List[str] = []
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                text = item.get("text")
+                if isinstance(text, str) and text:
+                    parts.append(text)
+            return "".join(parts).strip()
+        if content is None:
+            return ""
+        return str(content).strip()
+
+    @classmethod
+    def _sanitize_history_tool_pairing(cls, history: List[Dict[str, Any]]) -> None:
+        """
+        对 history 中的 userInputMessageContext.toolResults 做严格配对过滤：
+        - 仅保留能匹配到「此前出现过且尚未配对」的 assistant.toolUses 的 tool_result
+        - 被过滤掉的 tool_result 内容降级拼到 userInputMessage.content，避免丢信息 & 避免空消息触发上游 400
+        """
+        unpaired_tool_use_ids: set[str] = set()
+        all_tool_use_ids: set[str] = set()
+
+        for entry in history:
+            assistant = entry.get("assistantResponseMessage")
+            if isinstance(assistant, dict):
+                tool_uses = assistant.get("toolUses")
+                if isinstance(tool_uses, list):
+                    for tu in tool_uses:
+                        if not isinstance(tu, dict):
+                            continue
+                        tid = tu.get("toolUseId")
+                        if isinstance(tid, str) and tid:
+                            all_tool_use_ids.add(tid)
+                            unpaired_tool_use_ids.add(tid)
+
+            user = entry.get("userInputMessage")
+            if not isinstance(user, dict):
+                continue
+
+            ctx = user.get("userInputMessageContext")
+            if not isinstance(ctx, dict):
+                continue
+
+            results = ctx.get("toolResults")
+            if not isinstance(results, list) or not results:
+                continue
+
+            kept: List[Dict[str, Any]] = []
+            degraded_texts: List[str] = []
+
+            for r in results:
+                if not isinstance(r, dict):
+                    continue
+                tid = r.get("toolUseId")
+                if not isinstance(tid, str) or not tid:
+                    continue
+
+                if tid in unpaired_tool_use_ids:
+                    kept.append(r)
+                    unpaired_tool_use_ids.remove(tid)
+                    continue
+
+                if tid in all_tool_use_ids:
+                    logger.warning("跳过重复的 tool_result：toolUseId=%s", tid)
+                else:
+                    logger.warning("跳过孤立的 tool_result（找不到对应 tool_use）：toolUseId=%s", tid)
+
+                text = cls._tool_result_to_text(r)
+                if text:
+                    degraded_texts.append(text)
+
+            if kept:
+                ctx["toolResults"] = kept
+            else:
+                ctx.pop("toolResults", None)
+
+            if degraded_texts:
+                extra = "\n".join(degraded_texts).strip()
+                if extra:
+                    original = user.get("content")
+                    if isinstance(original, str) and original.strip():
+                        user["content"] = f"{original}\n{extra}"
+                    else:
+                        user["content"] = extra
+
+    @classmethod
+    def _append_orphan_tool_result_text(
+        cls,
+        current_text: str,
+        tool_results: List[Dict[str, Any]],
+        validated_tool_results: List[Dict[str, Any]],
+    ) -> str:
+        if not tool_results:
+            return current_text
+
+        validated_ids = set()
+        for r in validated_tool_results:
+            if isinstance(r, dict):
+                tid = r.get("toolUseId")
+                if isinstance(tid, str) and tid:
+                    validated_ids.add(tid)
+
+        degraded_texts: List[str] = []
+        for r in tool_results:
+            if not isinstance(r, dict):
+                continue
+            tid = r.get("toolUseId")
+            if not isinstance(tid, str) or not tid or tid in validated_ids:
+                continue
+            text = cls._tool_result_to_text(r)
+            if text:
+                degraded_texts.append(text)
+
+        if not degraded_texts:
+            return current_text
+
+        extra = "\n".join(degraded_texts).strip()
+        if not extra:
+            return current_text
+
+        if isinstance(current_text, str) and current_text.strip():
+            return f"{current_text}\n{extra}"
+        return extra
+
     @classmethod
     def _validate_tool_pairing(
         cls, history: List[Dict[str, Any]], tool_results: List[Dict[str, Any]]
@@ -465,4 +604,3 @@ class KiroAnthropicConverter:
             logger.warning("检测到孤立的 tool_use（找不到对应 tool_result）：toolUseId=%s", orphan_id)
 
         return filtered
-
