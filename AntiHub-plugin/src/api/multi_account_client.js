@@ -1,7 +1,7 @@
 import config, { getApiEndpoint, getEndpointCount } from '../config/config.js';
 import logger from '../utils/logger.js';
 import accountService from '../services/account.service.js';
-import quotaService from '../services/quota.service.js';
+import quotaService from '../services/quota.service.compat.js';
 import oauthService from '../services/oauth.service.js';
 import projectService from '../services/project.service.js';
 
@@ -797,15 +797,37 @@ class MultiAccountClient {
           logger.warn(`[配额刷新] project_id_0 为空，跳过刷新: cookie_id=${cookie_id}`);
           return;
         }
-        const response0 = await fetch(modelsUrl, {
+        let response0 = await fetch(modelsUrl, {
           method: 'POST',
           headers: requestHeaders,
-          body: JSON.stringify({ project: pid0 })
+          body: JSON.stringify({ projectId: pid0 })
         });
+
+        // 兼容不同字段命名（projectId vs project）
+        if (!response0.ok && response0.status === 400) {
+          response0 = await fetch(modelsUrl, {
+            method: 'POST',
+            headers: requestHeaders,
+            body: JSON.stringify({ project: pid0 })
+          });
+        }
         
         if (response0.ok) {
           const data0 = await response0.json();
           modelsData = data0.models || {};
+
+          // projectId 某些端点会“吃掉”但返回空 models，这里再用 project 兜底一轮
+          if (Object.keys(modelsData).length === 0) {
+            const retry = await fetch(modelsUrl, {
+              method: 'POST',
+              headers: requestHeaders,
+              body: JSON.stringify({ project: pid0 })
+            });
+            if (retry.ok) {
+              const retryData = await retry.json();
+              modelsData = retryData.models || {};
+            }
+          }
         } else {
           logger.warn(`[配额刷新] project_id_0 获取失败: HTTP ${response0.status}`);
         }

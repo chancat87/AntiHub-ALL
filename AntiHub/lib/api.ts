@@ -2369,6 +2369,37 @@ export async function getGeminiCLIAccountCredentials(accountId: number): Promise
   return result.data;
 }
 
+export interface GeminiCLIQuotaBucket {
+  model_id: string;
+  token_type: string | null;
+  remaining_fraction: number | null;
+  remaining_amount: number | null;
+  reset_time: string | null;
+}
+
+export interface GeminiCLIQuotaData {
+  fetched_at: string;
+  project_id: string;
+  raw: Record<string, any>;
+  buckets: GeminiCLIQuotaBucket[];
+}
+
+/**
+ * 查询 GeminiCLI 账号剩余额度（retrieveUserQuota）
+ */
+export async function getGeminiCLIAccountQuota(
+  accountId: number,
+  projectId?: string
+): Promise<GeminiCLIQuotaData> {
+  const url = `${API_BASE_URL}/api/gemini-cli/accounts/${accountId}/quota${
+    projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''
+  }`;
+  const result = await fetchWithAuth<{ success: boolean; data: GeminiCLIQuotaData }>(url, {
+    method: 'GET',
+  });
+  return result.data;
+}
+
 /**
  * 更新 GeminiCLI 账号状态
  */

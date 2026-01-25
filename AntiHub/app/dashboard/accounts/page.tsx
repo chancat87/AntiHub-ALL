@@ -33,6 +33,7 @@ import {
   getCodexWhamUsage,
   getGeminiCLIAccounts,
   getGeminiCLIAccountCredentials,
+  getGeminiCLIAccountQuota,
   deleteGeminiCLIAccount,
   updateGeminiCLIAccountStatus,
   updateGeminiCLIAccountName,
@@ -45,6 +46,7 @@ import {
   type QwenAccount,
   type CodexAccount,
   type GeminiCLIAccount,
+  type GeminiCLIQuotaData,
 } from '@/lib/api';
 import { AddAccountDrawer } from '@/components/add-account-drawer';
 import { Button } from '@/components/ui/button';
@@ -177,6 +179,12 @@ export default function AccountsPage() {
   // GeminiCLI 账号详情 Dialog 状态
   const [isGeminiCliDetailDialogOpen, setIsGeminiCliDetailDialogOpen] = useState(false);
   const [detailGeminiCliAccount, setDetailGeminiCliAccount] = useState<GeminiCLIAccount | null>(null);
+
+  // GeminiCLI 额度查询 Dialog 状态
+  const [isGeminiCliQuotaDialogOpen, setIsGeminiCliQuotaDialogOpen] = useState(false);
+  const [geminiCliQuotaAccount, setGeminiCliQuotaAccount] = useState<GeminiCLIAccount | null>(null);
+  const [geminiCliQuotaData, setGeminiCliQuotaData] = useState<GeminiCLIQuotaData | null>(null);
+  const [isLoadingGeminiCliQuota, setIsLoadingGeminiCliQuota] = useState(false);
 
   // Codex 限额窗口（wham/usage）Dialog 状态
   const [isCodexWhamDialogOpen, setIsCodexWhamDialogOpen] = useState(false);
@@ -748,6 +756,27 @@ export default function AccountsPage() {
         variant: 'error',
         position: 'top-right',
       });
+    }
+  };
+
+  const handleViewGeminiCliQuota = async (account: GeminiCLIAccount) => {
+    setGeminiCliQuotaAccount(account);
+    setIsGeminiCliQuotaDialogOpen(true);
+    setIsLoadingGeminiCliQuota(true);
+    setGeminiCliQuotaData(null);
+
+    try {
+      const data = await getGeminiCLIAccountQuota(account.account_id);
+      setGeminiCliQuotaData(data);
+    } catch (err) {
+      toasterRef.current?.show({
+        title: '查询失败',
+        message: err instanceof Error ? err.message : '查询额度失败',
+        variant: 'error',
+        position: 'top-right',
+      });
+    } finally {
+      setIsLoadingGeminiCliQuota(false);
     }
   };
 
@@ -2065,6 +2094,10 @@ export default function AccountsPage() {
                                   <IconInfoCircle className="size-4 mr-2" />
                                   账户详情
                                 </DropdownMenuItem>
+                                <DropdownMenuItem onClick={() => handleViewGeminiCliQuota(account)}>
+                                  <IconChartBar className="size-4 mr-2" />
+                                  额度查询
+                                </DropdownMenuItem>
                                 <DropdownMenuItem onClick={() => handleCopyGeminiCLICredentials(account)}>
                                   <IconCopy className="size-4 mr-2" />
                                   复制凭证为JSON
@@ -2190,6 +2223,84 @@ export default function AccountsPage() {
             ) : (
               <div className="text-center py-12 text-muted-foreground">
                 <p className="text-sm">暂无配额信息</p>
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* GeminiCLI 额度查询 Dialog */}
+      <Dialog
+        open={isGeminiCliQuotaDialogOpen}
+        onOpenChange={(open) => {
+          setIsGeminiCliQuotaDialogOpen(open);
+          if (!open) {
+            setGeminiCliQuotaAccount(null);
+            setGeminiCliQuotaData(null);
+            setIsLoadingGeminiCliQuota(false);
+          }
+        }}
+      >
+        <DialogContent className="max-w-[95vw] sm:max-w-[900px] max-h-[90vh] p-0">
+          <DialogHeader className="px-4 pt-6 pb-2 md:px-6 text-left">
+            <DialogTitle className="text-left">GeminiCLI 额度信息</DialogTitle>
+            <DialogDescription className="break-all text-left">
+              {geminiCliQuotaAccount ? `账号ID: ${geminiCliQuotaAccount.account_id}` : ''}
+              {geminiCliQuotaData?.project_id ? ` | Project: ${geminiCliQuotaData.project_id}` : ''}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="px-4 pb-6 md:px-6 overflow-y-auto max-h-[calc(90vh-120px)]">
+            {isLoadingGeminiCliQuota ? (
+              <div className="flex items-center justify-center py-12">
+                <MorphingSquare message="查询额度信息..." />
+              </div>
+            ) : geminiCliQuotaData && Array.isArray(geminiCliQuotaData.buckets) && geminiCliQuotaData.buckets.length > 0 ? (
+              <div className="overflow-x-auto -mx-4 md:mx-0">
+                <div className="inline-block min-w-full align-middle px-4 md:px-0">
+                  <div className="overflow-hidden">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="min-w-[220px]">模型</TableHead>
+                          <TableHead className="min-w-[120px]">Token类型</TableHead>
+                          <TableHead className="min-w-[120px]">剩余比例</TableHead>
+                          <TableHead className="min-w-[140px]">剩余数值</TableHead>
+                          <TableHead className="min-w-[220px]">重置时间</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {geminiCliQuotaData.buckets.map((bucket, idx) => (
+                          <TableRow key={`${bucket.model_id}-${bucket.token_type ?? 'default'}-${idx}`}>
+                            <TableCell className="font-mono text-xs md:text-sm break-all">
+                              {bucket.model_id}
+                            </TableCell>
+                            <TableCell className="text-xs md:text-sm">
+                              {bucket.token_type || '-'}
+                            </TableCell>
+                            <TableCell className="font-mono text-xs md:text-sm">
+                              {bucket.remaining_fraction === null || bucket.remaining_fraction === undefined
+                                ? '-'
+                                : `${(bucket.remaining_fraction * 100).toFixed(1)}%`}
+                            </TableCell>
+                            <TableCell className="font-mono text-xs md:text-sm">
+                              {bucket.remaining_amount === null || bucket.remaining_amount === undefined
+                                ? '-'
+                                : bucket.remaining_amount}
+                            </TableCell>
+                            <TableCell className="text-xs md:text-sm text-muted-foreground break-all">
+                              {bucket.reset_time || '-'}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="text-center py-12 text-muted-foreground">
+                <p className="text-sm">暂无额度信息</p>
               </div>
             )}
           </div>

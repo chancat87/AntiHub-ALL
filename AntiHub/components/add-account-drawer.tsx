@@ -38,7 +38,7 @@ import { IconExternalLink, IconCopy, IconX } from '@tabler/icons-react';
 import { Gemini, OpenAI, Qwen } from '@lobehub/icons';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
-import Toaster, { ToasterRef } from '@/components/ui/toast';
+import Toaster, { ToasterRef, showToast } from '@/components/ui/toast';
 
 interface AddAccountDrawerProps {
   open: boolean;
@@ -1441,7 +1441,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
   const handleSubmitGeminiCliCallback = async () => {
     const url = callbackUrl.trim();
     if (!url) {
-      toasterRef.current?.show({
+      (toasterRef.current?.show ?? showToast)({
         title: '输入错误',
         message: '请粘贴 callback_url',
         variant: 'warning',
@@ -1453,7 +1453,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
     try {
       await submitGeminiCLIOAuthCallback(url);
 
-      toasterRef.current?.show({
+      (toasterRef.current?.show ?? showToast)({
         title: '添加成功',
         message: 'GeminiCLI 账号已添加',
         variant: 'success',
@@ -1465,7 +1465,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
       resetState();
       onSuccess?.();
     } catch (err) {
-      toasterRef.current?.show({
+      (toasterRef.current?.show ?? showToast)({
         title: '添加失败',
         message: err instanceof Error ? err.message : '提交 GeminiCLI callback 失败',
         variant: 'error',
@@ -1524,7 +1524,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
 
     const providedName = geminiCliAccountName.trim();
     if (isBatch && providedName) {
-      toasterRef.current?.show({
+      (toasterRef.current?.show ?? showToast)({
         title: '提示',
         message: '批量导入会自动命名，已忽略"账号名称"',
         variant: 'warning',
@@ -1558,7 +1558,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
       }
 
       if (successCount === 0) {
-        toasterRef.current?.show({
+        (toasterRef.current?.show ?? showToast)({
           title: '导入失败',
           message: errors[0] || '导入 GeminiCLI 账号失败',
           variant: 'error',
@@ -1567,7 +1567,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
         return;
       }
 
-      toasterRef.current?.show({
+      (toasterRef.current?.show ?? showToast)({
         title: isBatch ? '批量导入完成' : '导入成功',
         message: isBatch
           ? `成功 ${successCount} 个${failedCount ? `，失败 ${failedCount} 个` : ''}`
@@ -1581,7 +1581,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
       resetState();
       onSuccess?.();
     } catch (err) {
-      toasterRef.current?.show({
+      (toasterRef.current?.show ?? showToast)({
         title: '导入失败',
         message: err instanceof Error ? err.message : '导入 GeminiCLI 账号失败',
         variant: 'error',

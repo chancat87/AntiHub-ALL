@@ -1221,21 +1221,46 @@ router.get('/api/accounts/:cookie_id/quotas', authenticateApiKey, async (req, re
     try {
       const pid0 = account.project_id_0 || '';
       logger.info(`  使用 project_id_0: ${pid0 || '(空)'}`);
-      const response0 = await fetch(config.api.modelsUrl, {
+      const headers = {
+        'Host': config.api.host,
+        'User-Agent': config.api.userAgent,
+        'Authorization': `Bearer ${account.access_token}`,
+        'Content-Type': 'application/json',
+        'Accept-Encoding': 'gzip'
+      };
+
+      let response0 = await fetch(config.api.modelsUrl, {
         method: 'POST',
-        headers: {
-          'Host': config.api.host,
-          'User-Agent': config.api.userAgent,
-          'Authorization': `Bearer ${account.access_token}`,
-          'Content-Type': 'application/json',
-          'Accept-Encoding': 'gzip'
-        },
-        body: JSON.stringify({ project: pid0 })
+        headers,
+        body: JSON.stringify({ projectId: pid0 })
       });
+
+      // 兼容不同字段命名（projectId vs project）
+      if (!response0.ok && response0.status === 400) {
+        response0 = await fetch(config.api.modelsUrl, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ project: pid0 })
+        });
+      }
 
       if (response0.ok) {
         const data0 = await response0.json();
         modelsData = data0.models || {};
+
+        // projectId 某些端点会“吃掉”但返回空 models，这里再用 project 兜底一轮
+        if (Object.keys(modelsData).length === 0) {
+          const retry = await fetch(config.api.modelsUrl, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ project: pid0 })
+          });
+
+          if (retry.ok) {
+            const retryData = await retry.json();
+            modelsData = retryData.models || {};
+          }
+        }
         logger.info(`  project_id_0 获取成功: ${Object.keys(modelsData).length} 个模型`);
       } else {
         logger.warn(`  project_id_0 获取失败: ${response0.status}`);

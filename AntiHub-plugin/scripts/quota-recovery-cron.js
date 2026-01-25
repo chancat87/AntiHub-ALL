@@ -10,7 +10,7 @@
  * 2. 添加到 crontab：0 * * * * /usr/bin/node /path/to/scripts/quota-recovery-cron.js
  */
 
-import quotaService from '../src/services/quota.service.js';
+import quotaService from '../src/services/quota.service.compat.js';
 import logger from '../src/utils/logger.js';
 import database from '../src/db/database.js';
 import config from '../src/config/config.js';

@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import logging
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -168,6 +170,33 @@ async def export_gemini_cli_account_credentials(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="导出凭证失败",
+        )
+
+
+@router.get("/accounts/{account_id}/quota", summary="查询 GeminiCLI 剩余额度（retrieveUserQuota）")
+async def get_gemini_cli_account_quota(
+    account_id: int,
+    project_id: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    service: GeminiCLIService = Depends(get_gemini_cli_service),
+):
+    try:
+        return await service.get_account_quota(
+            current_user.id, account_id, project_id=project_id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error(
+            "get gemini_cli quota failed: user_id=%s account_id=%s error=%s",
+            current_user.id,
+            account_id,
+            type(e).__name__,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="查询额度失败",
         )
 
 

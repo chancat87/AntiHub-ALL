@@ -2,7 +2,7 @@ import database from '../src/db/database.js';
 import logger from '../src/utils/logger.js';
 import oauthService from '../src/services/oauth.service.js';
 import accountService from '../src/services/account.service.js';
-import quotaService from '../src/services/quota.service.js';
+import quotaService from '../src/services/quota.service.compat.js';
 import fs from 'fs';
 
 // 读取配置文件

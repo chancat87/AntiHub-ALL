@@ -24,7 +24,17 @@ function normalizeNumberValue(value) {
 
 function normalizeQuotaFraction(value) {
   const normalized = normalizeNumberValue(value);
-  if (normalized !== null) return normalized;
+  if (normalized !== null) {
+    if (!Number.isFinite(normalized)) return null;
+    // Antigravity 有时会把 remainingFraction 作为百分比数值返回（例如 80 表示 80%）。
+    // 统一规范为 0~1 的小数，避免写入 DB（numeric(5,4)）时报错或 UI 误判为永远 100%。
+    let fraction = normalized;
+    if (fraction > 1 && fraction <= 100) fraction /= 100;
+    if (fraction < 0) fraction = 0;
+    // 避免异常值把 numeric(5,4) 顶爆；正常 remainingFraction 应该不会超过 1。
+    if (fraction > 9.9999) fraction = 9.9999;
+    return fraction;
+  }
 
   if (typeof value === 'string') {
     const trimmed = value.trim();
@@ -109,4 +119,3 @@ if (!quotaService.__quotaCompatPatched) {
 }
 
 export default quotaService;
-

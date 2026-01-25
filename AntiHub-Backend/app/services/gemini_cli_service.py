@@ -12,6 +12,7 @@ GeminiCLI 账号服务
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -152,6 +153,98 @@ def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
     return dt
 
 
+def _extract_project_id(value: Any) -> str:
+    """
+    从 cloudcode-pa 返回的字段中提取 project_id
+
+    兼容格式：
+    - "my-project-id"
+    - {"id":"my-project-id"}
+    - {"projectId":"my-project-id"} / {"project_id":"my-project-id"}
+    """
+    if not value:
+        return ""
+
+    if isinstance(value, str):
+        return value.strip()
+
+    if isinstance(value, dict):
+        for key in ("id", "projectId", "project_id"):
+            v = value.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+
+    return ""
+
+
+def _pick_first_project_id(value: Optional[str]) -> Optional[str]:
+    """
+    从 project_id 字符串中选择一个可用的项目 ID。
+
+    约定：
+    - 支持逗号分隔（多项目）
+    - 返回第一个非空且不是 "ALL" 的值
+    """
+    if not isinstance(value, str):
+        return None
+    for part in value.split(","):
+        candidate = part.strip()
+        if not candidate:
+            continue
+        if candidate.upper() == "ALL":
+            continue
+        return candidate
+    return None
+
+
+def _to_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return float(value)
+        except Exception:
+            return None
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        if s.endswith("%"):
+            try:
+                return float(s[:-1]) / 100.0
+            except Exception:
+                return None
+        try:
+            return float(s)
+        except Exception:
+            return None
+    return None
+
+
+def _default_tier_id(load_code_assist_resp: Dict[str, Any]) -> str:
+    """
+    从 loadCodeAssist 返回值中解析默认 tierId
+
+    与参考项目 CLIProxyAPI / AntiHub-plugin 保持一致：fallback 为 legacy-tier
+    """
+    fallback = "legacy-tier"
+    tiers = load_code_assist_resp.get("allowedTiers")
+    if not isinstance(tiers, list):
+        return fallback
+
+    for tier in tiers:
+        if not isinstance(tier, dict):
+            continue
+        if tier.get("isDefault") is True:
+            tier_id = tier.get("id")
+            if isinstance(tier_id, str) and tier_id.strip():
+                return tier_id.strip()
+
+    return fallback
+
+
 class GeminiCLIService:
     def __init__(self, db: AsyncSession, redis: RedisClient):
         self.db = db
@@ -228,7 +321,7 @@ class GeminiCLIService:
         2. 验证 state
         3. 用 code 换取 token
         4. 获取用户信息
-        5. 执行 onboarding（如果指定了 project_id）
+        5. 自动选择/校验 project_id，并执行 onboarding（loadCodeAssist/onboardUser/启用 API）
         6. 落库保存
         """
         parsed = _parse_oauth_callback(callback_url)
@@ -275,29 +368,36 @@ class GeminiCLIService:
             account_name = _default_account_name(email)
 
         project_id = (session.get("project_id") or "").strip() or None
+        is_all_projects = isinstance(project_id, str) and project_id.strip().upper() == "ALL"
+        explicit_project = bool(project_id) and not is_all_projects
 
         # 检查是否已存在
         existing = await self.repo.get_by_user_id_and_email(user_id, email)
 
-        # 执行 onboarding（如果指定了 project_id）
-        auto_project = False
+        # project_id 留空时自动获取（并标记 auto_project）
+        auto_project = (not explicit_project) and (not is_all_projects)
         checked = False
 
-        if project_id:
-            try:
-                await self._perform_onboarding(
+        try:
+            if is_all_projects:
+                project_id, checked = await self._perform_onboarding_all_projects(access_token)
+            else:
+                resolved_project_id, checked = await self._perform_onboarding(
                     access_token,
-                    project_id,
+                    project_id=project_id,
+                    explicit_project=explicit_project,
                 )
-                checked = True
-            except Exception as e:
-                logger.warning(
-                    "gemini_cli onboarding failed: email=%s project=%s error=%s",
-                    email,
-                    project_id,
-                    str(e),
-                )
-                # onboarding 失败不影响落库，只是 checked=False
+                # 未指定 project_id 时，以 onboarding 返回/推断结果为准
+                if not explicit_project and resolved_project_id:
+                    project_id = resolved_project_id
+        except Exception as e:
+            logger.warning(
+                "gemini_cli onboarding failed: email=%s project=%s error=%s",
+                email,
+                project_id,
+                str(e),
+            )
+            # onboarding 失败不影响落库，只是 checked=False
 
         if existing:
             updated = await self.repo.update_credentials_and_profile(
@@ -665,8 +765,10 @@ class GeminiCLIService:
     async def _perform_onboarding(
         self,
         access_token: str,
-        project_id: str,
-    ) -> None:
+        *,
+        project_id: Optional[str],
+        explicit_project: bool,
+    ) -> Tuple[Optional[str], bool]:
         """
         执行 Gemini CLI Onboarding 流程
 
@@ -683,21 +785,95 @@ class GeminiCLIService:
             "Client-Metadata": DEFAULT_CLIENT_METADATA,
         }
 
-        # 1. loadCodeAssist
-        await self._call_load_code_assist(headers, project_id)
+        resolved_project_id: Optional[str] = (project_id or "").strip() or None
 
-        # 2. onboardUser
-        await self._call_onboard_user(headers, project_id)
+        # 1. loadCodeAssist（project_id 可选）
+        load_resp = await self._call_load_code_assist(headers, project_id=resolved_project_id)
+        tier_id = _default_tier_id(load_resp)
 
-        # 3. enable Cloud AI API
-        await self._enable_cloud_ai_api(access_token, project_id)
+        if not resolved_project_id:
+            resolved_project_id = _extract_project_id(load_resp.get("cloudaicompanionProject")) or None
+
+        # 2. onboardUser（project_id 可选；done 轮询）
+        onboard_resp = await self._call_onboard_user(
+            headers,
+            tier_id=tier_id,
+            project_id=resolved_project_id,
+        )
+
+        onboard_project_id = _extract_project_id(
+            (onboard_resp.get("response") or {}).get("cloudaicompanionProject")
+            or onboard_resp.get("cloudaicompanionProject")
+        )
+
+        # 若用户未显式指定 project_id，则优先使用 onboardUser 返回的真实 project_id
+        if not explicit_project and onboard_project_id:
+            resolved_project_id = onboard_project_id
+
+        # 兜底：仍然拿不到 project_id 时，尝试通过 Cloud Resource Manager 拉项目列表选第一个
+        if not resolved_project_id:
+            resolved_project_id = await self._try_pick_first_gcp_project(access_token)
+
+        if not resolved_project_id:
+            return None, False
+
+        # 3. enable Cloud AI API，并回读确认
+        checked = await self._ensure_cloud_ai_api_enabled(access_token, resolved_project_id)
+        return resolved_project_id, checked
+
+    async def _perform_onboarding_all_projects(
+        self,
+        access_token: str,
+    ) -> Tuple[Optional[str], bool]:
+        """
+        project_id=ALL：对该账号可见的所有 GCP Project 逐个执行 onboarding。
+
+        返回值：
+        - project_id: 逗号分隔的 projectId 列表（仅保留 onboarding + Cloud AI API 校验成功的项目）
+        - checked: 是否成功获得至少一个可用项目
+        """
+        project_ids = await self._fetch_gcp_project_ids(access_token)
+        if not project_ids:
+            return None, False
+
+        enabled: List[str] = []
+        for pid in project_ids:
+            try:
+                resolved, ok = await self._perform_onboarding(
+                    access_token,
+                    project_id=pid,
+                    explicit_project=True,
+                )
+                if resolved and ok:
+                    enabled.append(resolved)
+            except Exception as e:
+                logger.warning(
+                    "gemini_cli onboard all projects failed: project=%s error=%s",
+                    pid,
+                    str(e),
+                )
+
+        # 去重但保序
+        uniq_enabled: List[str] = []
+        seen = set()
+        for pid in enabled:
+            if pid in seen:
+                continue
+            uniq_enabled.append(pid)
+            seen.add(pid)
+
+        if not uniq_enabled:
+            return None, False
+
+        return ",".join(uniq_enabled), True
 
     async def _call_load_code_assist(
         self,
         headers: Dict[str, str],
-        project_id: str,
-    ) -> None:
-        """调用 loadCodeAssist 接口"""
+        *,
+        project_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """调用 loadCodeAssist 接口（返回 JSON）"""
         url = f"{CLOUDCODE_PA_BASE_URL}:loadCodeAssist"
         body = {
             "metadata": {
@@ -705,11 +881,19 @@ class GeminiCLIService:
                 "platform": "PLATFORM_UNSPECIFIED",
                 "pluginType": "GEMINI",
             },
-            "cloudaicompanionProject": project_id,
         }
+        if project_id:
+            body["cloudaicompanionProject"] = project_id
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(url, json=body, headers=headers)
+
+        if resp.status_code == 204:
+            return {}
+
+        if resp.status_code == 200:
+            data = resp.json()
+            return data if isinstance(data, dict) else {}
 
         if resp.status_code not in (200, 204):
             logger.warning(
@@ -717,57 +901,114 @@ class GeminiCLIService:
                 resp.status_code,
                 resp.text[:500],
             )
+        return {}
 
     async def _call_onboard_user(
         self,
         headers: Dict[str, str],
-        project_id: str,
-    ) -> None:
+        *,
+        tier_id: str,
+        project_id: Optional[str],
+    ) -> Dict[str, Any]:
         """
         调用 onboardUser 接口
 
-        默认使用 default tier，可能需要轮询等待完成
+        使用 loadCodeAssist 的默认 tier，可能需要轮询等待完成
         """
         url = f"{CLOUDCODE_PA_BASE_URL}:onboardUser"
         body = {
-            "tierId": "default",
+            "tierId": tier_id,
             "metadata": {
                 "ideType": "IDE_UNSPECIFIED",
                 "platform": "PLATFORM_UNSPECIFIED",
                 "pluginType": "GEMINI",
             },
-            "cloudaicompanionProject": project_id,
         }
+        if project_id:
+            body["cloudaicompanionProject"] = project_id
+
+        last_payload: Dict[str, Any] = {}
+        max_attempts = 5
+        retry_delay_seconds = 2.0
 
         async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(url, json=body, headers=headers)
+            for attempt in range(1, max_attempts + 1):
+                resp = await client.post(url, json=body, headers=headers)
 
-        if resp.status_code not in (200, 204):
-            logger.warning(
-                "onboardUser failed: HTTP %s, response: %s",
-                resp.status_code,
-                resp.text[:500],
-            )
-            return
+                if resp.status_code == 204:
+                    return {}
 
-        # 检查是否需要轮询
-        data = resp.json() if resp.status_code == 200 else {}
-        if not data.get("done", False):
-            # 可以在这里实现轮询逻辑，但为简化先跳过
-            logger.info("onboardUser not done, skipping polling")
+                if resp.status_code != 200:
+                    logger.warning(
+                        "onboardUser failed: HTTP %s, response: %s",
+                        resp.status_code,
+                        resp.text[:500],
+                    )
+                    return {}
 
-    async def _enable_cloud_ai_api(
+                data = resp.json() if resp.status_code == 200 else {}
+                last_payload = data if isinstance(data, dict) else {}
+
+                if last_payload.get("done") is True:
+                    return last_payload
+
+                if attempt < max_attempts:
+                    await asyncio.sleep(retry_delay_seconds)
+
+        return last_payload
+
+    async def _check_cloud_ai_api_enabled(
         self,
         access_token: str,
         project_id: str,
-    ) -> None:
-        """启用 cloudaicompanion.googleapis.com API"""
+    ) -> bool:
+        """检查 cloudaicompanion.googleapis.com 是否已启用"""
+        service_name = "cloudaicompanion.googleapis.com"
+        url = f"{SERVICE_USAGE_BASE_URL}/projects/{project_id}/services/{service_name}"
+        headers = {"Authorization": f"Bearer {access_token}"}
+
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.get(url, headers=headers)
+        except Exception:
+            return False
+
+        if resp.status_code != 200:
+            return False
+
+        try:
+            data = resp.json()
+        except Exception:
+            return False
+
+        if not isinstance(data, dict):
+            return False
+
+        return (data.get("state") or "").upper() == "ENABLED"
+
+    async def _ensure_cloud_ai_api_enabled(
+        self,
+        access_token: str,
+        project_id: str,
+    ) -> bool:
+        """
+        尝试启用 cloudaicompanion.googleapis.com，并回读确认是否启用成功
+
+        注意：启用 API 可能需要项目已开通计费、账号具备足够权限。
+        """
+        if await self._check_cloud_ai_api_enabled(access_token, project_id):
+            return True
+
         service_name = "cloudaicompanion.googleapis.com"
         url = f"{SERVICE_USAGE_BASE_URL}/projects/{project_id}/services/{service_name}:enable"
         headers = {"Authorization": f"Bearer {access_token}"}
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(url, headers=headers)
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(url, headers=headers)
+        except Exception as e:
+            logger.warning("enable Cloud AI API failed: project=%s error=%s", project_id, str(e))
+            return False
 
         if resp.status_code not in (200, 204):
             logger.warning(
@@ -775,6 +1016,62 @@ class GeminiCLIService:
                 resp.status_code,
                 resp.text[:500],
             )
+            return False
+
+        return await self._check_cloud_ai_api_enabled(access_token, project_id)
+
+    async def _fetch_gcp_project_ids(self, access_token: str) -> List[str]:
+        """从 Cloud Resource Manager 拉取项目列表，返回 projectId 列表（去重、保序）"""
+        url = "https://cloudresourcemanager.googleapis.com/v1/projects"
+        headers = {"Authorization": f"Bearer {access_token}"}
+
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.get(url, headers=headers)
+        except Exception as e:
+            logger.warning("fetch gcp projects failed: %s", str(e))
+            return []
+
+        if resp.status_code != 200:
+            logger.warning(
+                "fetch gcp projects failed: HTTP %s, response: %s",
+                resp.status_code,
+                resp.text[:500],
+            )
+            return []
+
+        try:
+            data = resp.json()
+        except Exception:
+            return []
+
+        if not isinstance(data, dict):
+            return []
+
+        projects = data.get("projects")
+        if not isinstance(projects, list):
+            return []
+
+        out: List[str] = []
+        seen = set()
+        for p in projects:
+            if not isinstance(p, dict):
+                continue
+            pid = p.get("projectId")
+            if not isinstance(pid, str):
+                continue
+            pid = pid.strip()
+            if not pid or pid in seen:
+                continue
+            out.append(pid)
+            seen.add(pid)
+
+        return out
+
+    async def _try_pick_first_gcp_project(self, access_token: str) -> Optional[str]:
+        """兜底：从 Cloud Resource Manager 拉取项目列表并选择第一个 projectId"""
+        project_ids = await self._fetch_gcp_project_ids(access_token)
+        return project_ids[0] if project_ids else None
 
     def _load_account_credentials(self, account: Any) -> Dict[str, Any]:
         """加载账号凭证（解密）"""
@@ -909,3 +1206,138 @@ class GeminiCLIService:
             raise ValueError("账号缺少 access_token")
 
         return access_token
+
+    async def get_account_quota(
+        self,
+        user_id: int,
+        account_id: int,
+        *,
+        project_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        查询 Gemini CLI 剩余额度（cloudcode-pa retrieveUserQuota）。
+
+        说明：
+        - 使用账号保存的 OAuth refresh_token 自动刷新 access_token
+        - 默认使用账号的 project_id（支持逗号分隔多项目，取第一个）
+        - 可通过 project_id 参数覆盖（例如临时查询其它项目）
+        """
+        account = await self.repo.get_by_id_and_user_id(account_id, user_id)
+        if not account:
+            raise ValueError("账号不存在")
+
+        project_id_used = _pick_first_project_id(project_id) or _pick_first_project_id(
+            getattr(account, "project_id", None)
+        )
+        if not project_id_used:
+            raise ValueError("账号未设置 project_id，请先在账号里填写 GCP Project ID")
+
+        fetched_at = _now_utc()
+
+        async def _request(access_token: str) -> httpx.Response:
+            url = f"{CLOUDCODE_PA_BASE_URL}:retrieveUserQuota"
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+                "User-Agent": DEFAULT_USER_AGENT,
+                "X-Goog-Api-Client": DEFAULT_X_GOOG_API_CLIENT,
+                "Client-Metadata": DEFAULT_CLIENT_METADATA,
+            }
+            body = {"project": project_id_used}
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                return await client.post(url, json=body, headers=headers)
+
+        resp: Optional[httpx.Response] = None
+        try:
+            for attempt in range(2):
+                access_token = await self.get_valid_access_token(user_id, account_id)
+                resp = await _request(access_token)
+                if resp.status_code == 200:
+                    break
+                if resp.status_code in (401, 403) and attempt == 0:
+                    try:
+                        creds = self._load_account_credentials(account)
+                        await self._try_refresh_account(account, creds)
+                        refreshed = await self.repo.get_by_id_and_user_id(account_id, user_id)
+                        if refreshed:
+                            account = refreshed
+                    except Exception:
+                        pass
+                    continue
+                break
+
+            if resp is None:
+                raise ValueError("查询额度失败：请求未发出")
+
+            if resp.status_code != 200:
+                raise ValueError(
+                    f"查询额度失败：上游返回 HTTP {resp.status_code}（{resp.text[:300]}）"
+                )
+
+            try:
+                raw = resp.json()
+            except Exception as e:
+                raise ValueError("查询额度失败：上游响应不是合法 JSON") from e
+
+            if not isinstance(raw, dict):
+                raise ValueError("查询额度失败：上游响应格式异常（非对象）")
+
+            buckets_raw = raw.get("buckets")
+            buckets_in = buckets_raw if isinstance(buckets_raw, list) else []
+            buckets: List[Dict[str, Any]] = []
+            for entry in buckets_in:
+                if not isinstance(entry, dict):
+                    continue
+                model_id = entry.get("modelId") or entry.get("model_id")
+                token_type = entry.get("tokenType") or entry.get("token_type")
+                remaining_fraction = _to_float(
+                    entry.get("remainingFraction") or entry.get("remaining_fraction")
+                )
+                remaining_amount = _to_float(
+                    entry.get("remainingAmount") or entry.get("remaining_amount")
+                )
+                reset_time = entry.get("resetTime") or entry.get("reset_time")
+                if isinstance(model_id, str):
+                    model_id = model_id.strip()
+                else:
+                    model_id = ""
+                if not model_id:
+                    continue
+                if isinstance(token_type, str):
+                    token_type = token_type.strip() or None
+                else:
+                    token_type = None
+                if isinstance(reset_time, str):
+                    reset_time = reset_time.strip() or None
+                else:
+                    reset_time = None
+
+                # 兜底：有些返回可能给的是百分比整数（0-100）
+                if remaining_fraction is not None and remaining_fraction > 1.0 and remaining_fraction <= 100.0:
+                    remaining_fraction = remaining_fraction / 100.0
+
+                buckets.append(
+                    {
+                        "model_id": model_id,
+                        "token_type": token_type,
+                        "remaining_fraction": remaining_fraction,
+                        "remaining_amount": remaining_amount,
+                        "reset_time": reset_time,
+                    }
+                )
+
+            return {
+                "success": True,
+                "data": {
+                    "fetched_at": fetched_at,
+                    "project_id": project_id_used,
+                    "raw": raw,
+                    "buckets": buckets,
+                },
+            }
+        finally:
+            if resp is not None:
+                try:
+                    await resp.aclose()
+                except Exception:
+                    pass
