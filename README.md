@@ -39,6 +39,7 @@
 5. QwenCli: 已完成开发，待测试
 6. CodexCLI: 已完全支持
 7. GeminiCLI： 已完全支持
+8. ZAI-TTS: 已完成开发，待测试
 
 ## 你需要准备
 
