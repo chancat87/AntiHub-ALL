@@ -28,6 +28,7 @@ from app.schemas.anthropic import (
     AnthropicErrorResponse,
 )
 from app.cache import RedisClient
+from app.utils.token_counter import count_all_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -361,58 +362,48 @@ async def count_tokens(
 ):
     """
     计算消息的token数量
-    
-    注意：这是一个简化实现，实际token计数可能与Anthropic官方有差异
+
+    参考 kiro.rs 的实现：
+    - 非西文字符：每个计 4 个字符单位
+    - 西文字符：每个计 1 个字符单位
+    - 4 个字符单位 = 1 token
+    - 根据 token 数量应用系数调整
+    - 计算 system、messages、tools 的 token
     """
     try:
-        # 手动解析请求体，因为 max_tokens 对于 count_tokens 不是必需的
-        import json
         body = await raw_request.json()
-        
+
         # 验证必需字段
         if "model" not in body:
             raise ValueError("缺少必需字段: model")
         if "messages" not in body:
             raise ValueError("缺少必需字段: messages")
-        model = body.get("model")
+
         messages = body.get("messages", [])
         system = body.get("system")
-        
-        # 简单估算：将所有文本内容拼接后按字符数估算
-        # 实际应该使用tokenizer，这里只是提供一个近似值
-        total_chars = 0
-        
-        # 计算system消息
-        if system:
-            if isinstance(system, str):
-                total_chars += len(system)
-            elif isinstance(system, list):
-                for block in system:
-                    if isinstance(block, dict) and 'text' in block:
-                        total_chars += len(block['text'])
-                    elif hasattr(block, 'text'):
-                        total_chars += len(block.text)
-        
-        # 计算消息内容
-        for msg in messages:
-            content = msg.get('content') if isinstance(msg, dict) else msg.content
-            if isinstance(content, str):
-                total_chars += len(content)
-            elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and 'text' in block:
-                        total_chars += len(block['text'])
-                    elif hasattr(block, 'text'):
-                        total_chars += len(block.text)
-        
-        # 粗略估算：平均每4个字符约1个token（英文）
-        # 中文可能是每1.5-2个字符1个token
-        estimated_tokens = total_chars // 3
-        
+        tools = body.get("tools")
+
+        # 使用优化后的 token 计算
+        estimated_tokens = count_all_tokens(
+            messages=messages,
+            system=system,
+            tools=tools
+        )
+
         return {
             "input_tokens": estimated_tokens
         }
-        
+
+    except ValueError as e:
+        logger.error(f"Token计数请求验证失败: {str(e)}")
+        error_response = AnthropicAdapter.create_error_response(
+            error_type="invalid_request_error",
+            message=str(e)
+        )
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content=error_response.model_dump()
+        )
     except Exception as e:
         logger.error(f"Token计数失败: {str(e)}")
         error_response = AnthropicAdapter.create_error_response(
