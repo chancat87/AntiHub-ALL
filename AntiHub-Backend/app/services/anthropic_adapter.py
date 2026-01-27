@@ -3,6 +3,8 @@ Anthropic格式转换器服务
 将Anthropic Messages API格式转换为OpenAI格式，并将OpenAI响应转换回Anthropic格式
 """
 from typing import Optional, Dict, Any, List, Union, AsyncGenerator, Tuple
+import ast
+import asyncio
 import json
 import uuid
 import time
@@ -478,6 +480,132 @@ class AnthropicAdapter:
             return "none"
         
         return "auto"
+
+    @classmethod
+    def _parse_tool_arguments(cls, arguments: Any) -> Dict[str, Any]:
+        """
+        尽可能把上游 tool_call.function.arguments 解析成 dict。
+
+        兼容：
+        - arguments 已经是 dict（某些上游/中间层会直接给对象）
+        - arguments 是 JSON 字符串
+        - arguments 是“Python 字面量”字符串（单引号、True/False、末尾逗号等）
+        - arguments 被双重编码成 JSON 字符串（先解一层再解一层）
+        """
+        if arguments is None:
+            return {}
+
+        if isinstance(arguments, dict):
+            return arguments
+
+        # 兼容 Pydantic/BaseModel 等
+        if hasattr(arguments, "model_dump"):
+            try:
+                dumped = arguments.model_dump(exclude_none=True)  # type: ignore[call-arg]
+                if isinstance(dumped, dict):
+                    return dumped
+            except Exception:
+                pass
+
+        if not isinstance(arguments, str):
+            return {}
+
+        raw = arguments.strip()
+        if not raw:
+            return {}
+
+        # 1) 优先按 JSON 解
+        try:
+            parsed: Any = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            parsed = None
+
+        # 2) 处理“双重编码”（JSON string 里包 JSON object）
+        for _ in range(2):
+            if isinstance(parsed, dict):
+                return parsed
+            if isinstance(parsed, str):
+                inner = parsed.strip()
+                if not inner:
+                    break
+                try:
+                    parsed = json.loads(inner)
+                    continue
+                except (json.JSONDecodeError, TypeError):
+                    parsed = None
+                    break
+            break
+
+        # 3) 尝试截取 {...} 片段再解析（常见于前后混入说明文字）
+        if "{" in raw and "}" in raw:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if end > start:
+                candidate = raw[start : end + 1]
+                try:
+                    parsed2 = json.loads(candidate)
+                    if isinstance(parsed2, dict):
+                        return parsed2
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+                try:
+                    parsed2 = ast.literal_eval(candidate)
+                    if isinstance(parsed2, dict):
+                        return parsed2
+                except Exception:
+                    pass
+
+        # 4) 最后尝试按 Python 字面量解（兼容单引号等）
+        try:
+            parsed3 = ast.literal_eval(raw)
+            if isinstance(parsed3, dict):
+                return parsed3
+        except Exception:
+            pass
+
+        return {}
+
+    @classmethod
+    def _normalize_claude_code_tool_input(cls, tool_name: str, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Claude Code 内置工具常见的入参命名是 snake_case，但部分上游会生成 camelCase。
+        这里做一层“向后兼容”的字段别名映射，避免 Edit/Read/Write 这类工具因字段名不一致直接报错。
+        """
+        if not isinstance(input_data, dict) or not input_data or not tool_name:
+            return input_data
+
+        name = str(tool_name).strip().lower()
+        out = dict(input_data)
+
+        if name == "edit":
+            aliases = {"filePath": "file_path", "oldString": "old_string", "newString": "new_string"}
+        elif name == "read":
+            aliases = {"filePath": "file_path"}
+        elif name == "write":
+            aliases = {"filePath": "file_path", "text": "content"}
+        else:
+            aliases = {}
+
+        for src, dst in aliases.items():
+            if src in out and dst not in out:
+                out[dst] = out[src]
+
+        return out
+
+    @classmethod
+    def _missing_required_args_for_claude_code_tool(cls, tool_name: str, input_data: Dict[str, Any]) -> List[str]:
+        name = str(tool_name or "").strip().lower()
+        if name == "edit":
+            required = ("file_path", "old_string", "new_string")
+        elif name == "read":
+            required = ("file_path",)
+        elif name == "write":
+            required = ("file_path", "content")
+        else:
+            return []
+
+        return [k for k in required if k not in input_data]
     
     @classmethod
     def openai_to_anthropic_response(
@@ -556,26 +684,41 @@ class AnthropicAdapter:
             content.append(AnthropicResponseTextContent(text=text_content))
         
         # 处理工具调用
+        valid_tool_uses = 0
         for tool_call in tool_calls:
             if tool_call.get("type") == "function":
                 func = tool_call.get("function", {})
-                arguments_str = func.get("arguments", "{}") or "{}"  # 处理空字符串情况
-                
-                try:
-                    input_data = json.loads(arguments_str)
-                except json.JSONDecodeError as e:
-                    # 记录解析失败的详细信息
-                    logger.warning(f"工具调用参数JSON解析失败: {e}")
-                    logger.warning(f"原始arguments字符串: '{arguments_str}'")
-                    logger.warning(f"工具名称: {func.get('name', 'unknown')}")
-                    logger.warning(f"工具调用ID: {tool_call.get('id', 'unknown')}")
-                    input_data = {}
-                
-                content.append(AnthropicResponseToolUseContent(
-                    id=tool_call.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
-                    name=func.get("name", ""),
-                    input=input_data
-                ))
+                tool_name = func.get("name", "")
+
+                input_data = cls._parse_tool_arguments(func.get("arguments"))
+                input_data = cls._normalize_claude_code_tool_input(tool_name, input_data)
+                missing = cls._missing_required_args_for_claude_code_tool(tool_name, input_data)
+                if missing:
+                    raw_args = func.get("arguments")
+                    raw_str = "" if raw_args is None else str(raw_args)
+                    raw_preview = raw_str[:500] + ("…" if len(raw_str) > 500 else "")
+                    logger.warning(
+                        "Claude Code tool_call 参数缺失，已降级为纯文本: tool=%s, missing=%s, tool_call_id=%s, raw=%s",
+                        tool_name,
+                        ",".join(missing),
+                        tool_call.get("id", "unknown"),
+                        raw_preview,
+                    )
+                    content.append(
+                        AnthropicResponseTextContent(
+                            text=f"[tool_call_error] {tool_name} missing required args: {', '.join(missing)}"
+                        )
+                    )
+                    continue
+
+                content.append(
+                    AnthropicResponseToolUseContent(
+                        id=tool_call.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
+                        name=tool_name,
+                        input=input_data,
+                    )
+                )
+                valid_tool_uses += 1
         
         # 如果没有内容，添加空文本
         if not content:
@@ -585,9 +728,11 @@ class AnthropicAdapter:
         finish_reason = choice.get("finish_reason", "stop")
         stop_reason = cls.STOP_REASON_FROM_OPENAI.get(finish_reason, "end_turn")
         
-        # 如果有工具调用，停止原因应该是tool_use
-        if tool_calls:
+        # 只有“确实输出了 tool_use block”才返回 tool_use，避免 Claude Code 因空入参直接报错
+        if valid_tool_uses > 0:
             stop_reason = "tool_use"
+        elif finish_reason in ("tool_calls", "function_call"):
+            stop_reason = "end_turn"
         
         anthropic_response = AnthropicMessagesResponse(
             id=f"msg_{openai_response.get('id', uuid.uuid4().hex[:24])}",
@@ -1117,61 +1262,92 @@ class AnthropicAdapter:
         yield f"event: content_block_stop\ndata: {json.dumps(content_block_stop, ensure_ascii=False)}\n\n"
         
         
-        # 记录text块结束后的索引，用于工具调用块
-        text_block_index = current_block_index
+        # text 块结束后，后续 block 从下一个索引开始
         current_block_index += 1
         
         # 如果有工具调用，发送工具调用块
-        for idx, tc in current_tool_calls.items():
-            block_index = current_block_index + idx
-            
-            # 解析参数
-            arguments_str = tc['arguments'] or "{}"  # 处理空字符串情况
-            try:
-                input_data = json.loads(arguments_str) if arguments_str and arguments_str.strip() else {}
-            except json.JSONDecodeError as e:
-                # 记录解析失败的详细信息
-                logger.warning(f"流式响应工具调用参数JSON解析失败: {e}")
-                logger.warning(f"原始arguments字符串: '{arguments_str}'")
-                logger.warning(f"工具名称: {tc['name']}")
-                logger.warning(f"工具调用ID: {tc['id']}")
-                input_data = {}
-            
+        next_block_index = current_block_index
+        emitted_tool_use = False
+        for _, tc in sorted(current_tool_calls.items(), key=lambda x: x[0]):
+            tool_name = tc.get("name", "")
+            raw_args = tc.get("arguments", "")
+
+            input_data = cls._parse_tool_arguments(raw_args)
+            input_data = cls._normalize_claude_code_tool_input(tool_name, input_data)
+            missing = cls._missing_required_args_for_claude_code_tool(tool_name, input_data)
+
+            # Claude Code 内置工具缺参时，直接输出 tool_use 会导致本地工具校验报错；这里降级为纯文本，确保对话不中断。
+            if missing:
+                raw_str = "" if raw_args is None else str(raw_args)
+                raw_preview = raw_str[:500] + ("…" if len(raw_str) > 500 else "")
+                logger.warning(
+                    "Claude Code stream tool_call 参数缺失，已降级为纯文本: tool=%s, missing=%s, tool_call_id=%s, raw=%s",
+                    tool_name,
+                    ",".join(missing),
+                    tc.get("id", "unknown"),
+                    raw_preview,
+                )
+
+                text_block_start = {
+                    "type": "content_block_start",
+                    "index": next_block_index,
+                    "content_block": {"type": "text", "text": ""},
+                }
+                yield f"event: content_block_start\ndata: {json.dumps(text_block_start, ensure_ascii=False)}\n\n"
+
+                warn_delta = {
+                    "type": "content_block_delta",
+                    "index": next_block_index,
+                    "delta": {
+                        "type": "text_delta",
+                        "text": f"[tool_call_error] {tool_name} missing required args: {', '.join(missing)}",
+                    },
+                }
+                yield f"event: content_block_delta\ndata: {json.dumps(warn_delta, ensure_ascii=False)}\n\n"
+
+                text_block_stop = {"type": "content_block_stop", "index": next_block_index}
+                yield f"event: content_block_stop\ndata: {json.dumps(text_block_stop, ensure_ascii=False)}\n\n"
+
+                next_block_index += 1
+                continue
+
             # content_block_start for tool_use
             tool_block_start = {
                 "type": "content_block_start",
-                "index": block_index,
+                "index": next_block_index,
                 "content_block": {
                     "type": "tool_use",
-                    "id": tc['id'] or f"toolu_{uuid.uuid4().hex[:24]}",
-                    "name": tc['name'],
-                    "input": {}
-                }
+                    "id": tc.get("id") or f"toolu_{uuid.uuid4().hex[:24]}",
+                    "name": tool_name,
+                    "input": {},
+                },
             }
             yield f"event: content_block_start\ndata: {json.dumps(tool_block_start, ensure_ascii=False)}\n\n"
-            
+
             # content_block_delta for tool_use input
             if input_data:
                 tool_delta = {
                     "type": "content_block_delta",
-                    "index": block_index,
+                    "index": next_block_index,
                     "delta": {
                         "type": "input_json_delta",
-                        "partial_json": json.dumps(input_data, ensure_ascii=False)
-                    }
+                        "partial_json": json.dumps(input_data, ensure_ascii=False),
+                    },
                 }
                 yield f"event: content_block_delta\ndata: {json.dumps(tool_delta, ensure_ascii=False)}\n\n"
-            
+
             # content_block_stop for tool_use
-            tool_block_stop = {
-                "type": "content_block_stop",
-                "index": block_index
-            }
+            tool_block_stop = {"type": "content_block_stop", "index": next_block_index}
             yield f"event: content_block_stop\ndata: {json.dumps(tool_block_stop, ensure_ascii=False)}\n\n"
+
+            emitted_tool_use = True
+            next_block_index += 1
         
         # 确定停止原因
-        if current_tool_calls:
+        if emitted_tool_use:
             stop_reason = "tool_use"
+        elif finish_reason in ("tool_calls", "function_call"):
+            stop_reason = "end_turn"
         elif finish_reason:
             stop_reason = cls.STOP_REASON_FROM_OPENAI.get(finish_reason, "end_turn")
         else:
@@ -1199,6 +1375,110 @@ class AnthropicAdapter:
             "type": "message_stop"
         }
         yield f"event: message_stop\ndata: {json.dumps(message_stop, ensure_ascii=False)}\n\n"
+
+    @classmethod
+    async def convert_openai_stream_to_anthropic_cc(
+        cls,
+        openai_stream: AsyncGenerator[bytes, None],
+        model: str,
+        request_id: str,
+        thinking_enabled: bool = False,
+        ping_interval_seconds: float = 25.0,
+    ) -> AsyncGenerator[str, None]:
+        """
+        Claude Code (2.1.9+) 兼容的 Anthropic SSE 转换。
+
+        现象：Claude Code 新版不再从 `message_delta` 读取 `input_tokens`，而是从 `message_start` 中读取；
+        但上游（OpenAI 兼容流）通常在流末尾才返回 usage，因此必须“先缓冲、后输出”。
+
+        行为：
+        - 缓冲完整事件流，直到拿到 `usage`（来自 `message_delta.usage`）
+        - 将真实 tokens 写入 `message_start.message.usage` 后再输出所有事件
+        - 等待期间按 SSE 注释发送 `: ping` 保活（不影响事件顺序）
+
+        注意：该模式会牺牲流式实时输出，仅用于 Claude Code 兼容端点（/cc/v1）。
+        """
+
+        base_gen = cls.convert_openai_stream_to_anthropic(
+            openai_stream=openai_stream,
+            model=model,
+            request_id=request_id,
+            thinking_enabled=thinking_enabled,
+        )
+
+        buffered_events: List[str] = []
+        input_tokens = 0
+        output_tokens = 0
+
+        pending_task: Optional[asyncio.Task] = asyncio.create_task(base_gen.__anext__())
+        try:
+            while True:
+                done, _ = await asyncio.wait({pending_task}, timeout=ping_interval_seconds)
+
+                if not done:
+                    yield ": ping\n\n"
+                    continue
+
+                try:
+                    event = pending_task.result()
+                except StopAsyncIteration:
+                    break
+
+                pending_task = asyncio.create_task(base_gen.__anext__())
+
+                # 丢弃原始 message_start，最后用正确 usage 重新生成并作为首事件输出
+                if event.startswith("event: message_start"):
+                    continue
+
+                # 从 message_delta 中抓取 usage（convert_openai_stream_to_anthropic 会把完整 usage 放在这里）
+                if event.startswith("event: message_delta"):
+                    try:
+                        data_line = next(
+                            (line for line in event.splitlines() if line.startswith("data: ")),
+                            "",
+                        )
+                        if data_line:
+                            payload = json.loads(data_line[6:])
+                            usage = payload.get("usage", {})
+                            input_tokens = usage.get("input_tokens", input_tokens)
+                            output_tokens = usage.get("output_tokens", output_tokens)
+                    except Exception:
+                        # usage 解析失败就保持为 0，不影响主流程
+                        pass
+
+                buffered_events.append(event)
+        finally:
+            if pending_task and not pending_task.done():
+                pending_task.cancel()
+                try:
+                    await pending_task
+                except Exception:
+                    pass
+            try:
+                await base_gen.aclose()
+            except Exception:
+                pass
+
+        message_start = {
+            "type": "message_start",
+            "message": {
+                "id": f"msg_{request_id}",
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": model,
+                "stop_reason": None,
+                "stop_sequence": None,
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                },
+            },
+        }
+        yield f"event: message_start\ndata: {json.dumps(message_start, ensure_ascii=False)}\n\n"
+
+        for buffered_event in buffered_events:
+            yield buffered_event
     
     @classmethod
     async def collect_openai_stream_to_response(

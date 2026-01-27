@@ -197,6 +197,24 @@ uv run python app/main.py
 | GET | `/v1/models` | 获取模型列表 |
 | POST | `/v1/chat/completions` | 聊天补全（流式/非流式） |
 
+### Anthropic 兼容接口
+
+| 方法 | 路径 | 描述 |
+|------|------|------|
+| POST | `/v1/messages` | Anthropic Messages API（流式/非流式） |
+| POST | `/v1/messages/count_tokens` | 估算输入 Token 数量 |
+
+### Claude Code 兼容接口（/cc/v1）
+
+Claude Code 2.1.9+ 会从 `message_start` 读取 `input_tokens`。由于上游 usage 往往在流末尾才返回，本项目提供 `/cc/v1` 前缀的兼容端点，会缓冲 SSE 并在输出前更正 `message_start` 的 tokens。
+
+Claude Code 配置时，把 Anthropic Base URL 指向 `http://<host>:<port>/cc`（最终请求 `/cc/v1/messages`）。
+
+| 方法 | 路径 | 描述 |
+|------|------|------|
+| POST | `/cc/v1/messages` | Claude Code 兼容 Messages（缓冲 SSE，message_start tokens 为真实值） |
+| POST | `/cc/v1/messages/count_tokens` | 同 `/v1/messages/count_tokens` |
+
 ### 使用统计
 
 | 方法 | 路径 | 描述 |

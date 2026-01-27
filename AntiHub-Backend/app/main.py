@@ -29,6 +29,7 @@ from app.api.routes import (
     kiro_aws_idc_router,
     qwen_router,
     anthropic_router,
+    anthropic_cc_router,
     gemini_router,
     codex_router,
     gemini_cli_router,
@@ -187,6 +188,7 @@ def create_app() -> FastAPI:
     app.include_router(zai_tts_router)  # ZAI TTS账号管理API
     app.include_router(v1_router)  # OpenAI兼容API，支持Antigravity和Kiro配置
     app.include_router(anthropic_router)  # Anthropic兼容API (/v1/messages)
+    app.include_router(anthropic_cc_router)  # Claude Code兼容API (/cc/v1/messages)
     app.include_router(gemini_router)  # Gemini兼容API (/v1beta/models/{model}:generateContent)
     
     # ==================== 异常处理器 ====================
