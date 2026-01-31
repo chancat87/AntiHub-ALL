@@ -982,6 +982,22 @@ export async function deleteAPIKey(keyId: number): Promise<any> {
 }
 
 /**
+ * 更新指定 API Key 的类型（config_type）
+ */
+export async function updateAPIKeyType(
+  keyId: number,
+  configType: 'antigravity' | 'kiro' | 'qwen' | 'codex' | 'gemini-cli' | 'zai-tts' | 'zai-image'
+): Promise<CreateAPIKeyResponse> {
+  return fetchWithAuth<CreateAPIKeyResponse>(
+    `${API_BASE_URL}/api/api-keys/${keyId}/type`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ config_type: configType }),
+    }
+  );
+}
+
+/**
  * 提交 OAuth 回调
  */
 export async function submitOAuthCallback(callbackUrl: string): Promise<any> {

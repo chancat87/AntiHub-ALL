@@ -5,6 +5,7 @@ import {
   deleteAPIKey,
   generateAPIKey,
   getAPIKeys,
+  updateAPIKeyType,
   getCodexFallbackConfig,
   getCurrentUser,
   getKiroSubscriptionModelRules,
@@ -24,6 +25,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import {
   Dialog,
   DialogContent,
@@ -59,6 +61,10 @@ export default function SettingsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
   const [deletingKeyId, setDeletingKeyId] = useState<number | null>(null);
+  const [isEditTypeDialogOpen, setIsEditTypeDialogOpen] = useState(false);
+  const [editingKey, setEditingKey] = useState<PluginAPIKey | null>(null);
+  const [editingConfigType, setEditingConfigType] = useState<PluginAPIKey['config_type']>('antigravity');
+  const [isUpdatingKeyType, setIsUpdatingKeyType] = useState(false);
   const [selectedConfigType, setSelectedConfigType] = useState<'antigravity' | 'kiro' | 'qwen' | 'codex' | 'gemini-cli' | 'zai-tts' | 'zai-image'>('antigravity');
   const [configTypePage, setConfigTypePage] = useState(0);
   const [keyName, setKeyName] = useState('');
@@ -363,6 +369,44 @@ export default function SettingsPage() {
     }
   };
 
+  const handleOpenEditTypeDialog = (key: PluginAPIKey) => {
+    setEditingKey(key);
+    setEditingConfigType(key.config_type);
+    setIsEditTypeDialogOpen(true);
+  };
+
+  const handleUpdateKeyType = async () => {
+    if (!editingKey) return;
+    if (editingConfigType === editingKey.config_type) {
+      setIsEditTypeDialogOpen(false);
+      setEditingKey(null);
+      return;
+    }
+
+    setIsUpdatingKeyType(true);
+    try {
+      await updateAPIKeyType(editingKey.id, editingConfigType);
+      toasterRef.current?.show({
+        title: '已更新',
+        message: 'API密钥类型已修改',
+        variant: 'success',
+        position: 'top-right',
+      });
+      await loadAPIKeys();
+      setIsEditTypeDialogOpen(false);
+      setEditingKey(null);
+    } catch (err) {
+      toasterRef.current?.show({
+        title: '更新失败',
+        message: err instanceof Error ? err.message : '更新API密钥类型失败',
+        variant: 'error',
+        position: 'top-right',
+      });
+    } finally {
+      setIsUpdatingKeyType(false);
+    }
+  };
+
   const handleCopyKey = (key: string) => {
     navigator.clipboard.writeText(key);
     toasterRef.current?.show({
@@ -544,19 +588,32 @@ export default function SettingsPage() {
                             }
                           </td>
                           <td className="p-3 text-right">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => handleDeleteKey(key.id)}
-                              disabled={deletingKeyId === key.id}
-                              className="text-red-500 hover:text-red-600 hover:bg-red-500/10"
-                            >
-                              {deletingKeyId === key.id ? (
-                                <MorphingSquare className="size-4" />
-                              ) : (
-                                <IconTrash className="size-4" />
-                              )}
-                            </Button>
+                            <div className="flex items-center justify-end gap-1">
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => handleOpenEditTypeDialog(key)}
+                                disabled={deletingKeyId === key.id || isUpdatingKeyType}
+                                className="text-muted-foreground hover:text-foreground hover:bg-muted/60"
+                                aria-label="修改类型"
+                              >
+                                <IconSettings className="size-4" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => handleDeleteKey(key.id)}
+                                disabled={deletingKeyId === key.id || isUpdatingKeyType}
+                                className="text-red-500 hover:text-red-600 hover:bg-red-500/10"
+                                aria-label="删除"
+                              >
+                                {deletingKeyId === key.id ? (
+                                  <MorphingSquare className="size-4" />
+                                ) : (
+                                  <IconTrash className="size-4" />
+                                )}
+                              </Button>
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -1081,6 +1138,78 @@ export default function SettingsPage() {
                 </>
               ) : (
                 '创建'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 修改 API Key 类型弹窗 */}
+      <Dialog
+        open={isEditTypeDialogOpen}
+        onOpenChange={(open) => {
+          setIsEditTypeDialogOpen(open);
+          if (!open) setEditingKey(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-[500px]">
+          <DialogHeader>
+            <DialogTitle>修改密钥类型</DialogTitle>
+            <DialogDescription>
+              {editingKey ? `密钥：${editingKey.name}` : '修改此密钥走的渠道类型'}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label>新类型</Label>
+              <Select
+                value={editingConfigType}
+                onValueChange={(value) => setEditingConfigType(value as PluginAPIKey['config_type'])}
+                disabled={isUpdatingKeyType}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="请选择类型" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="antigravity">Antigravity</SelectItem>
+                  <SelectItem value="kiro">Kiro</SelectItem>
+                  <SelectItem value="qwen">Qwen</SelectItem>
+                  <SelectItem value="codex">Codex</SelectItem>
+                  <SelectItem value="gemini-cli">GeminiCLI</SelectItem>
+                  <SelectItem value="zai-tts">ZAI TTS</SelectItem>
+                  <SelectItem value="zai-image">ZAI Image</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                修改后，使用该密钥的请求会走新类型对应的渠道。
+              </p>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setIsEditTypeDialogOpen(false)}
+              disabled={isUpdatingKeyType}
+            >
+              取消
+            </Button>
+            <Button
+              onClick={handleUpdateKeyType}
+              disabled={
+                isUpdatingKeyType ||
+                !editingKey ||
+                editingConfigType === editingKey.config_type
+              }
+            >
+              {isUpdatingKeyType ? (
+                <>
+                  <MorphingSquare className="size-4 mr-2" />
+                  保存中...
+                </>
+              ) : (
+                '保存'
               )}
             </Button>
           </DialogFooter>

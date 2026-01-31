@@ -1,15 +1,29 @@
 """
 API密钥相关的数据模式
 """
-from typing import Optional
+from typing import Optional, Literal
 from datetime import datetime
 from pydantic import BaseModel, Field
+
+
+APIKeyConfigType = Literal[
+    "antigravity",
+    "kiro",
+    "qwen",
+    "codex",
+    "gemini-cli",
+    "zai-tts",
+    "zai-image",
+]
 
 
 class APIKeyCreate(BaseModel):
     """创建API密钥请求"""
     name: Optional[str] = Field(None, description="密钥名称，方便识别")
-    config_type: str = Field("antigravity", description="配置类型：antigravity / kiro / qwen / codex / gemini-cli / zai-tts / zai-image")
+    config_type: APIKeyConfigType = Field(
+        "antigravity",
+        description="配置类型：antigravity / kiro / qwen / codex / gemini-cli / zai-tts / zai-image",
+    )
 
 
 class APIKeyResponse(BaseModel):
@@ -18,7 +32,10 @@ class APIKeyResponse(BaseModel):
     user_id: int
     key: str = Field(..., description="API密钥")
     name: Optional[str] = None
-    config_type: str = Field(..., description="配置类型：antigravity / kiro / qwen / codex / gemini-cli / zai-tts / zai-image")
+    config_type: APIKeyConfigType = Field(
+        ...,
+        description="配置类型：antigravity / kiro / qwen / codex / gemini-cli / zai-tts / zai-image",
+    )
     is_active: bool
     created_at: datetime
     last_used_at: Optional[datetime] = None
@@ -33,7 +50,10 @@ class APIKeyListResponse(BaseModel):
     user_id: int
     key_preview: str = Field(..., description="密钥预览（前8位）")
     name: Optional[str] = None
-    config_type: str = Field(..., description="配置类型：antigravity / kiro / qwen / codex / gemini-cli / zai-tts / zai-image")
+    config_type: APIKeyConfigType = Field(
+        ...,
+        description="配置类型：antigravity / kiro / qwen / codex / gemini-cli / zai-tts / zai-image",
+    )
     is_active: bool
     created_at: datetime
     last_used_at: Optional[datetime] = None
@@ -45,3 +65,11 @@ class APIKeyListResponse(BaseModel):
 class APIKeyUpdateStatus(BaseModel):
     """更新API密钥状态"""
     is_active: bool = Field(..., description="是否激活")
+
+
+class APIKeyUpdateType(BaseModel):
+    """更新API密钥类型"""
+    config_type: APIKeyConfigType = Field(
+        ...,
+        description="配置类型：antigravity / kiro / qwen / codex / gemini-cli / zai-tts / zai-image",
+    )

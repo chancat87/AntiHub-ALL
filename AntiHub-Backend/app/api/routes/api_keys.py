@@ -5,7 +5,8 @@ API密钥管理路由
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import get_current_user, get_db, get_redis
+from app.cache import RedisClient
 from app.models.user import User
 from app.repositories.api_key_repository import APIKeyRepository
 from app.schemas.api_key import (
@@ -13,6 +14,7 @@ from app.schemas.api_key import (
     APIKeyResponse,
     APIKeyListResponse,
     APIKeyUpdateStatus,
+    APIKeyUpdateType,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -162,6 +164,54 @@ async def update_api_key_status(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"更新API密钥状态失败"
+        )
+
+
+@router.patch(
+    "/{key_id}/type",
+    response_model=APIKeyResponse,
+    summary="更新API密钥类型",
+    description="修改指定API密钥的配置类型（config_type）"
+)
+async def update_api_key_type(
+    key_id: int,
+    request: APIKeyUpdateType,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+):
+    """更新API密钥类型"""
+    try:
+        repo = APIKeyRepository(db)
+        api_key = await repo.update_type(
+            key_id=key_id,
+            user_id=current_user.id,
+            config_type=request.config_type,
+        )
+
+        if not api_key:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="API密钥不存在或无权访问"
+            )
+
+        await db.commit()
+
+        # 清理 API Key 认证缓存，避免 config_type 变更后短时间内继续走旧路由
+        try:
+            await redis.delete(f"api_key_auth:{api_key.key}")
+        except Exception:
+            # Redis 不可用不应阻塞更新
+            pass
+
+        return APIKeyResponse.model_validate(api_key)
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"更新API密钥类型失败"
         )
 
 

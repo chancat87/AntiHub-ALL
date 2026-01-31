@@ -135,3 +135,23 @@ class APIKeyRepository:
             await self.db.refresh(api_key)
             return api_key
         return None
+    
+    async def update_type(self, key_id: int, user_id: int, config_type: str) -> Optional[APIKey]:
+        """
+        更新密钥类型
+        
+        Args:
+            key_id: 密钥ID
+            user_id: 用户ID（用于验证权限）
+            config_type: 配置类型（antigravity / kiro / qwen / codex / gemini-cli / zai-tts / zai-image）
+            
+        Returns:
+            更新后的API密钥对象
+        """
+        api_key = await self.get_by_id(key_id)
+        if api_key and api_key.user_id == user_id:
+            api_key.config_type = config_type
+            await self.db.flush()
+            await self.db.refresh(api_key)
+            return api_key
+        return None
