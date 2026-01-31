@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps_flexible import get_user_flexible_with_x_api_key
 from app.api.deps import get_plugin_api_service, get_db_session, get_redis
+from app.core.spec_guard import ensure_spec_allowed
 from app.models.user import User
 from app.services.plugin_api_service import PluginAPIService
 from app.services.kiro_service import KiroService
@@ -125,8 +126,14 @@ async def _create_message_impl(
         # 判断使用哪个服务
         config_type = getattr(current_user, "_config_type", None)
 
-        # 如果是JWT token认证（无_config_type），检查请求头
-        if config_type is None:
+        # 如果是 API key 模式（有 _config_type），按 Spec 白名单拦截（避免非白名单悄悄走 plug-in 默认通道）。
+        if isinstance(config_type, str) and config_type.strip():
+            config_type = config_type.strip().lower()
+            ensure_spec_allowed("Claude", config_type)
+        else:
+            config_type = None
+
+            # 如果是 JWT token 认证（无 _config_type），检查请求头（保持现有约束）
             api_type = raw_request.headers.get("X-Api-Type")
             if api_type in ["kiro", "antigravity", "qwen"]:
                 config_type = api_type
@@ -377,7 +384,7 @@ async def create_message(
     3. Authorization Bearer JWT token - 用于网页聊天，默认使用Antigravity配置，但可以通过X-Api-Type请求头指定配置
     
     **配置选择:**
-    - 使用API key时，根据创建时选择的config_type（antigravity/kiro/qwen）自动路由
+    - 使用API key时，仅允许 config_type=antigravity/kiro（其它类型会 403：不支持的规范）
     - 使用JWT token时，默认使用Antigravity配置，但可以通过X-Api-Type请求头指定配置（antigravity/kiro/qwen）
     - Kiro配置需要beta权限（qwen不需要）
     
