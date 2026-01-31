@@ -102,60 +102,93 @@ export async function generateAssistantResponse(requestBody, callback, endpointI
   const decoder = new TextDecoder();
   let reasoningContent = ''; // 累积 reasoning_content
   let toolCalls = [];
+  let sseBuffer = '';
+  let parseErrorCount = 0;
+  const MAX_SSE_BUFFER_SIZE = 1024 * 1024; // 1MB，防止极端情况下无换行导致内存无界增长
+
+  const processSseLine = (line) => {
+    const trimmedLine = typeof line === 'string' ? line.trim() : '';
+    if (!trimmedLine.startsWith('data:')) return;
+
+    const jsonStr = trimmedLine.slice('data:'.length).trim();
+    if (!jsonStr || jsonStr === '[DONE]') return;
+
+    try {
+      const data = JSON.parse(jsonStr);
+
+      const parts = data.response?.candidates?.[0]?.content?.parts;
+      if (parts) {
+        for (const part of parts) {
+          if (part.thought === true) {
+            // Gemini 的思考内容转换为 OpenAI 兼容的 reasoning_content 格式
+            reasoningContent += part.text || '';
+            callback({ type: 'reasoning', content: part.text || '' });
+          } else if (part.text !== undefined) {
+            // 过滤掉空的非thought文本
+            if (part.text.trim() === '') {
+              continue;
+            }
+            callback({ type: 'text', content: part.text });
+          } else if (part.functionCall) {
+            toolCalls.push({
+              id: part.functionCall.id,
+              type: 'function',
+              function: {
+                name: part.functionCall.name,
+                arguments: JSON.stringify(part.functionCall.args)
+              }
+            });
+          }
+        }
+      }
+
+      // 当遇到 finishReason 时，发送所有收集的工具调用
+      if (data.response?.candidates?.[0]?.finishReason && toolCalls.length > 0) {
+        callback({ type: 'tool_calls', tool_calls: toolCalls });
+        toolCalls = [];
+      }
+    } catch (e) {
+      // 理论上这里不应该频繁发生（我们已经做了跨 chunk 的按行缓冲）。
+      parseErrorCount++;
+    }
+  };
 
   let chunkCount = 0;
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     
-    const chunk = decoder.decode(value);
+    const chunk = decoder.decode(value, { stream: true });
     chunkCount++;
-    const lines = chunk.split('\n');
+    sseBuffer += chunk;
 
-    for (const line of lines) {
-      const trimmedLine = typeof line === 'string' ? line.trim() : '';
-      if (!trimmedLine.startsWith('data:')) continue;
-
-      const jsonStr = trimmedLine.slice('data:'.length).trim();
-      if (!jsonStr || jsonStr === '[DONE]') continue;
-      try {
-        const data = JSON.parse(jsonStr);
-        
-        const parts = data.response?.candidates?.[0]?.content?.parts;
-        if (parts) {
-          for (const part of parts) {
-            if (part.thought === true) {
-              // Gemini 的思考内容转换为 OpenAI 兼容的 reasoning_content 格式
-              reasoningContent += part.text || '';
-              callback({ type: 'reasoning', content: part.text || '' });
-            } else if (part.text !== undefined) {
-              // 过滤掉空的非thought文本
-              if (part.text.trim() === '') {
-                continue;
-              }
-              callback({ type: 'text', content: part.text });
-            } else if (part.functionCall) {
-              toolCalls.push({
-                id: part.functionCall.id,
-                type: 'function',
-                function: {
-                  name: part.functionCall.name,
-                  arguments: JSON.stringify(part.functionCall.args)
-                }
-              });
-            }
-          }
-        }
-        
-        // 当遇到 finishReason 时，发送所有收集的工具调用
-        if (data.response?.candidates?.[0]?.finishReason && toolCalls.length > 0) {
-          callback({ type: 'tool_calls', tool_calls: toolCalls });
-          toolCalls = [];
-        }
-      } catch (e) {
-        // 忽略解析错误
-      }
+    if (sseBuffer.length > MAX_SSE_BUFFER_SIZE) {
+      // 只保留尾部，避免内存爆炸；并尽量保留最后一个未完整的行
+      sseBuffer = sseBuffer.slice(-MAX_SSE_BUFFER_SIZE);
+      console.debug('[SSE] buffer truncated (too large)');
     }
+
+    let newlineIndex;
+    while ((newlineIndex = sseBuffer.indexOf('\n')) !== -1) {
+      const line = sseBuffer.slice(0, newlineIndex);
+      sseBuffer = sseBuffer.slice(newlineIndex + 1);
+      processSseLine(line);
+    }
+  }
+
+  // flush decoder internal buffer (multi-byte chars)
+  sseBuffer += decoder.decode();
+  let newlineIndex;
+  while ((newlineIndex = sseBuffer.indexOf('\n')) !== -1) {
+    const line = sseBuffer.slice(0, newlineIndex);
+    sseBuffer = sseBuffer.slice(newlineIndex + 1);
+    processSseLine(line);
+  }
+  if (sseBuffer.trim()) {
+    processSseLine(sseBuffer);
+  }
+  if (parseErrorCount > 0) {
+    console.debug(`[SSE] ignored ${parseErrorCount} JSON parse errors`);
   }
 }
 
