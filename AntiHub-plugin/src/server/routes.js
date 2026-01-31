@@ -25,7 +25,11 @@ function resolveAccountType(headers) {
     normalizeHeaderValue(headers?.['x-api-type']) ||
     '';
   const normalized = raw.trim().toLowerCase();
-  return normalized || 'antigravity';
+  return normalized || null;
+}
+
+function isSupportedAccountType(accountType) {
+  return accountType === 'antigravity' || accountType === 'kiro' || accountType === 'qwen';
 }
 
 function inferAccountTypeFromModel(model) {
@@ -1568,6 +1572,11 @@ router.get('/v1/models', authenticateApiKey, async (req, res) => {
       });
     }
 
+    if (!isSupportedAccountType(accountType)) {
+      logger.warn(`不支持的账号类型: ${accountType}`);
+      return res.status(400).json({ error: `不支持的账号类型: ${accountType}` });
+    }
+
     if (accountType === 'kiro') {
       // 使用 kiro 账号系统
       const kiroClient = (await import('../api/kiro_client.js')).default;
@@ -1624,7 +1633,14 @@ router.post('/v1/chat/completions', authenticateApiKey, async (req, res) => {
     const inferred = inferAccountTypeFromModel(model);
     if (inferred) {
       accountType = inferred;
+    } else {
+      accountType = 'antigravity';
     }
+  }
+
+  if (!isSupportedAccountType(accountType)) {
+    logger.warn(`不支持的账号类型: ${accountType}`);
+    return res.status(400).json({ error: `不支持的账号类型: ${accountType}` });
   }
 
   if (accountType === 'qwen') {
