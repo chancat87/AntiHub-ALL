@@ -159,10 +159,39 @@ get_env_value() {
     printf '%s' "$value"
 }
 
+# 修复 docker 目录权限（解决 NAS 等环境下的权限问题）
+fix_permissions() {
+    log_info "修复 docker 目录权限..."
+
+    # 获取脚本所在目录（即项目根目录）
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    # 仅处理 docker 目录，避免误改 .env / 仓库其它文件权限
+    TARGET_DIR="$SCRIPT_DIR/docker"
+    if [ ! -d "$TARGET_DIR" ]; then
+        log_warn "未找到 docker 目录，跳过权限修复"
+        return 0
+    fi
+
+    # 目录设置为 755 (rwxr-xr-x)
+    find "$TARGET_DIR" -type d -exec chmod 755 {} \; 2>/dev/null || true
+
+    # 普通文件设置为 644 (rw-r--r--)
+    find "$TARGET_DIR" -type f -exec chmod 644 {} \; 2>/dev/null || true
+
+    # 脚本文件设置为 755 (rwxr-xr-x)
+    find "$TARGET_DIR" -name "*.sh" -type f -exec chmod 755 {} \; 2>/dev/null || true
+
+    log_info "docker 目录权限修复完成"
+}
+
 # 主函数
 main() {
     log_info "开始部署 AntiHub-ALL..."
     echo ""
+
+    # 0. 修复权限（解决 NAS 等环境下的权限问题）
+    fix_permissions
 
     # 1. 检查依赖
     log_info "检查系统依赖..."
