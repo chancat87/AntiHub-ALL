@@ -44,6 +44,7 @@
 
 - 必配：你自己的密钥（`JWT_SECRET_KEY`、`PLUGIN_ADMIN_API_KEY`、`PLUGIN_API_ENCRYPTION_KEY`）
 - 可选：外部 PostgreSQL / Redis（如果你不想用 compose 自带的）
+- 可选：`KIRO_IDE_VERSION`（Kiro 请求 User-Agent 版本；默认内置 `0.9.2`）
 
 ## 一键部署
 
