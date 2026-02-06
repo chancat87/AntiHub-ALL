@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 import base64
 import hashlib
 import json
@@ -51,6 +51,7 @@ OPENAI_CREDIT_GRANTS_URLS = (
 
 
 SUPPORTED_MODELS = [
+    "gpt-5.3-codex",
     "gpt-5.2-codex",
     "gpt-5.2",
     "gpt-5.1-codex-max",
@@ -428,7 +429,7 @@ def _get_supported_models() -> list[str]:
 def _pick_codex_ping_model(models: list[str]) -> str:
     if not models:
         return ""
-    preferred = ("gpt-5.2-codex", "gpt-5.1-codex", "gpt-5-codex")
+    preferred = ("gpt-5.3-codex", "gpt-5.2-codex", "gpt-5.1-codex", "gpt-5-codex")
     lowered = {m.lower(): m for m in models}
     for key in preferred:
         if key in lowered:
@@ -778,6 +779,23 @@ def _normalize_codex_responses_request(request_data: Dict[str, Any]) -> Dict[str
                 "content": [{"type": "input_text", "text": input_value}],
             }
         ]
+
+    # CLIProxyAPI 实测：Codex upstream 会拒绝 input 数组里的 role=system（400: System messages are not allowed）。
+    # 为了兼容 OpenAI /v1/responses 的请求形态，这里将其转换为 role=developer（不丢失内容）。
+    input_items = body.get("input")
+    if isinstance(input_items, list) and input_items:
+        changed = False
+        new_items: List[Any] = []
+        for it in input_items:
+            if isinstance(it, dict) and str(it.get("role") or "").strip().lower() == "system":
+                cloned = dict(it)
+                cloned["role"] = "developer"
+                new_items.append(cloned)
+                changed = True
+            else:
+                new_items.append(it)
+        if changed:
+            body["input"] = new_items
     body.pop("previous_response_id", None)
     body.pop("prompt_cache_retention", None)
     body.pop("safety_identifier", None)
