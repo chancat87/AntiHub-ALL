@@ -732,11 +732,16 @@ class AnthropicAdapter:
         out = dict(input_data)
 
         if name == "edit":
-            aliases = {"filePath": "file_path", "oldString": "old_string", "newString": "new_string"}
+            aliases = {
+                "filePath": "file_path",
+                "path": "file_path",
+                "oldString": "old_string",
+                "newString": "new_string",
+            }
         elif name == "read":
-            aliases = {"filePath": "file_path"}
+            aliases = {"filePath": "file_path", "path": "file_path"}
         elif name == "write":
-            aliases = {"filePath": "file_path", "text": "content"}
+            aliases = {"filePath": "file_path", "path": "file_path", "text": "content"}
         else:
             aliases = {}
 
