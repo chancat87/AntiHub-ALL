@@ -114,20 +114,7 @@ export default function AnalyticsPage() {
 
   useEffect(() => {
     if (!isTabInitialized) return;
-
-    if (
-      activeTab === 'qwen' ||
-      activeTab === 'codex' ||
-      activeTab === 'gemini-cli' ||
-      activeTab === 'zai-tts' ||
-      activeTab === 'zai-image'
-    ) {
-      loadRequestData();
-      return;
-    }
-
-    // 非 usage_logs Tab：避免额外请求/报错 Toast，也避免首次进入页面一直转圈
-    setIsLoadingRequests(false);
+    loadRequestData();
   }, [isTabInitialized, activeTab, requestCurrentPage]);
 
   const loadTabData = async () => {
@@ -384,15 +371,19 @@ export default function AnalyticsPage() {
     ((activeTab === 'qwen' || activeTab === 'codex' || activeTab === 'gemini-cli' || activeTab === 'zai-tts' || activeTab === 'zai-image') && requestLogs.length === 0 && !requestStats);
 
   const requestProviderLabel =
-    activeTab === 'codex'
-      ? 'Codex'
-      : activeTab === 'gemini-cli'
-        ? 'GeminiCLI'
-        : activeTab === 'zai-tts'
-          ? 'ZAI TTS'
-          : activeTab === 'zai-image'
-            ? 'ZAI Image'
-            : 'Qwen';
+    activeTab === 'antigravity'
+      ? 'Antigravity'
+      : activeTab === 'kiro'
+        ? 'Kiro'
+        : activeTab === 'codex'
+          ? 'Codex'
+          : activeTab === 'gemini-cli'
+            ? 'GeminiCLI'
+            : activeTab === 'zai-tts'
+              ? 'ZAI TTS'
+              : activeTab === 'zai-image'
+                ? 'ZAI Image'
+                : 'Qwen';
 
   if ((isLoading || isLoadingRequests) && isFirstLoadForTab) {
     return (
@@ -685,12 +676,14 @@ export default function AnalyticsPage() {
         )}
 
         {/* 请求统计（本系统记录 / usage_logs） */}
-        {(activeTab === 'qwen' || activeTab === 'codex' || activeTab === 'gemini-cli' || activeTab === 'zai-tts' || activeTab === 'zai-image') && (
+        {(activeTab === 'antigravity' || activeTab === 'kiro' || activeTab === 'qwen' || activeTab === 'codex' || activeTab === 'gemini-cli' || activeTab === 'zai-tts' || activeTab === 'zai-image') && (
           <>
             <Card className="mb-6">
               <CardHeader>
                 <CardTitle>请求统计</CardTitle>
-                <CardDescription>统计本系统记录的 {requestProviderLabel} 调用（成功与失败都会记录）</CardDescription>
+                <CardDescription>
+                  统计本系统记录的 {requestProviderLabel} 调用（成功与失败都会记录），可在下方使用记录中点击「查看」查看请求头/请求体
+                </CardDescription>
               </CardHeader>
               <CardContent>
                 {isLoadingRequests ? (
@@ -773,8 +766,8 @@ export default function AnalyticsPage() {
 
             <Card>
               <CardHeader>
-                <CardTitle>使用记录</CardTitle>
-                <CardDescription>共 {requestTotalRecords} 条使用记录</CardDescription>
+                <CardTitle>请求记录</CardTitle>
+                <CardDescription>共 {requestTotalRecords} 条请求记录</CardDescription>
               </CardHeader>
               <CardContent>
                 {isLoadingRequests ? (
@@ -783,7 +776,7 @@ export default function AnalyticsPage() {
                   </div>
                 ) : requestLogs.length === 0 ? (
                   <div className="text-center py-12 text-muted-foreground">
-                    <p className="text-lg mb-2">暂无使用记录</p>
+                    <p className="text-lg mb-2">暂无请求记录</p>
                     <p className="text-sm">
                       {activeTab === 'zai-image'
                         ? `先用 ${requestProviderLabel} 生成一张图吧！`
