@@ -4,10 +4,3 @@ services:
     build:
       context: ./AntiHub-Backend
       dockerfile: Dockerfile
-
-  plugin:
-    image: antihub-plugin:local
-    build:
-      context: ./AntiHub-plugin
-      dockerfile: Dockerfile
-

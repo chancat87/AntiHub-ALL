@@ -10,6 +10,13 @@ strip_cr() {
     printf '%s' "$1" | tr -d '\r'
 }
 
+# 合并后默认不再创建 plugin DB；仅迁移期需要时显式开启：PLUGIN_DB_INIT_ENABLED=true
+PLUGIN_DB_INIT_ENABLED=$(strip_cr "${PLUGIN_DB_INIT_ENABLED:-}")
+if [ "$PLUGIN_DB_INIT_ENABLED" != "true" ]; then
+    echo "[initdb] PLUGIN_DB_INIT_ENABLED!=true，跳过初始化 plugin DB（默认行为）"
+    exit 0
+fi
+
 POSTGRES_USER=$(strip_cr "${POSTGRES_USER:-antihub}")
 POSTGRES_PASSWORD=$(strip_cr "${POSTGRES_PASSWORD:-please-change-me}")
 PLUGIN_DB_NAME=$(strip_cr "${PLUGIN_DB_NAME:-antigravity}")
