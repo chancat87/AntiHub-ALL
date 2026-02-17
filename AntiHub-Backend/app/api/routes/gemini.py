@@ -282,13 +282,9 @@ async def generate_content(
                 request_data=request.model_dump(),
                 stream=False,
             )
-            extra_headers: Dict[str, str] = {"X-Account-Type": effective_config_type}
-            openai_resp = await plugin_api_service.proxy_request(
+            openai_resp = await plugin_api_service.openai_chat_completions(
                 user_id=current_user.id,
-                method="POST",
-                path="/v1/chat/completions",
-                json_data=openai_request,
-                extra_headers=extra_headers,
+                request_data=openai_request,
             )
 
             result = openai_chat_response_to_gemini_response(openai_resp)
@@ -509,28 +505,20 @@ async def stream_generate_content(
             if alt != "sse":
                 raise ValueError("Antigravity route A 目前仅支持 alt=sse 的流式响应")
 
-            api_key = await plugin_api_service.get_user_api_key(current_user.id)
-            if not api_key:
-                raise ValueError("用户未配置plug-in API密钥")
-
             openai_request = gemini_generate_content_request_to_openai_chat_request(
                 model=model,
                 request_data=request.model_dump(),
                 stream=True,
             )
-            extra_headers: Dict[str, str] = {"X-Account-Type": effective_config_type}
 
             tracker = SSEUsageTracker()
             translator = ChatCompletionsSSEToGeminiSSETranslator()
 
             async def generate():
                 try:
-                    async for chunk in plugin_api_service.proxy_stream_request(
+                    async for chunk in plugin_api_service.openai_chat_completions_stream(
                         user_id=current_user.id,
-                        method="POST",
-                        path="/v1/chat/completions",
-                        json_data=openai_request,
-                        extra_headers=extra_headers,
+                        request_data=openai_request,
                     ):
                         if isinstance(chunk, (bytes, bytearray)):
                             tracker.feed(bytes(chunk))

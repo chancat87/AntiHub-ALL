@@ -15,11 +15,12 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps_flexible import get_user_flexible_with_x_api_key
-from app.api.deps import get_plugin_api_service, get_db_session, get_redis
+from app.api.deps import get_plugin_api_service, get_qwen_api_service, get_db_session, get_redis
 from app.core.spec_guard import ensure_spec_allowed
 from app.models.user import User
 from app.services.plugin_api_service import PluginAPIService
 from app.services.kiro_service import KiroService
+from app.services.qwen_api_service import QwenAPIService
 from app.services.anthropic_adapter import AnthropicAdapter
 from app.services.kiro_anthropic_converter import KiroAnthropicConverter
 from app.utils.kiro_converters import is_thinking_enabled
@@ -103,6 +104,7 @@ async def _create_message_impl(
     raw_request: Request,
     current_user: User,
     antigravity_service: PluginAPIService,
+    qwen_service: QwenAPIService,
     kiro_service: KiroService,
     anthropic_version: Optional[str],
     anthropic_beta: Optional[str],
@@ -166,11 +168,6 @@ async def _create_message_impl(
                 # Qwen 上游不支持 OpenAI 多模态 content list；这里做最小可用降级（保文本，丢图）。
                 upstream_request = AnthropicAdapter.sanitize_openai_request_for_qwen(upstream_request)
 
-        # 准备额外的请求头
-        extra_headers = {}
-        if config_type:
-            extra_headers["X-Account-Type"] = config_type
-
         # 如果是流式请求
         if request.stream:
             # /v1/messages: message_start.input_tokens 是估算值（对齐 kiro.rs）
@@ -196,14 +193,16 @@ async def _create_message_impl(
                             user_id=current_user.id,
                             request_data=upstream_request,
                         )
-                    else:
-                        # 使用Antigravity服务
-                        openai_stream = antigravity_service.proxy_stream_request(
+                    elif config_type == "qwen":
+                        openai_stream = qwen_service.openai_chat_completions_stream(
                             user_id=current_user.id,
-                            method="POST",
-                            path="/v1/chat/completions",
-                            json_data=upstream_request,
-                            extra_headers=extra_headers if extra_headers else None,
+                            request_data=upstream_request,
+                        )
+                    else:
+                        # 使用Antigravity服务（Backend 内直连，不再依赖 plug-in）
+                        openai_stream = antigravity_service.openai_chat_completions_stream(
+                            user_id=current_user.id,
+                            request_data=upstream_request,
                         )
 
                     # 转换流式响应为Anthropic格式
@@ -259,14 +258,16 @@ async def _create_message_impl(
                 user_id=current_user.id,
                 request_data=upstream_request,
             )
-        else:
-            # 使用Antigravity服务的流式接口
-            openai_stream = antigravity_service.proxy_stream_request(
+        elif config_type == "qwen":
+            openai_stream = qwen_service.openai_chat_completions_stream(
                 user_id=current_user.id,
-                method="POST",
-                path="/v1/chat/completions",
-                json_data=upstream_request,
-                extra_headers=extra_headers if extra_headers else None,
+                request_data=upstream_request,
+            )
+        else:
+            # 使用Antigravity服务的流式接口（Backend 内直连，不再依赖 plug-in）
+            openai_stream = antigravity_service.openai_chat_completions_stream(
+                user_id=current_user.id,
+                request_data=upstream_request,
             )
 
         # 收集流式响应并转换为完整的OpenAI响应
@@ -390,6 +391,7 @@ async def create_message(
     raw_request: Request,
     current_user: User = Depends(get_user_flexible_with_x_api_key),
     antigravity_service: PluginAPIService = Depends(get_plugin_api_service),
+    qwen_service: QwenAPIService = Depends(get_qwen_api_service),
     kiro_service: KiroService = Depends(get_kiro_service),
     anthropic_version: Optional[str] = Header(None, alias="anthropic-version"),
     anthropic_beta: Optional[str] = Header(None, alias="anthropic-beta")
@@ -417,6 +419,7 @@ async def create_message(
         raw_request=raw_request,
         current_user=current_user,
         antigravity_service=antigravity_service,
+        qwen_service=qwen_service,
         kiro_service=kiro_service,
         anthropic_version=anthropic_version,
         anthropic_beta=anthropic_beta,
@@ -453,6 +456,7 @@ async def create_message_cc(
     raw_request: Request,
     current_user: User = Depends(get_user_flexible_with_x_api_key),
     antigravity_service: PluginAPIService = Depends(get_plugin_api_service),
+    qwen_service: QwenAPIService = Depends(get_qwen_api_service),
     kiro_service: KiroService = Depends(get_kiro_service),
     anthropic_version: Optional[str] = Header(None, alias="anthropic-version"),
     anthropic_beta: Optional[str] = Header(None, alias="anthropic-beta")
@@ -469,6 +473,7 @@ async def create_message_cc(
         raw_request=raw_request,
         current_user=current_user,
         antigravity_service=antigravity_service,
+        qwen_service=qwen_service,
         kiro_service=kiro_service,
         anthropic_version=anthropic_version,
         anthropic_beta=anthropic_beta,

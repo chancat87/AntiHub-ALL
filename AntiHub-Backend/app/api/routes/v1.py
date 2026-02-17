@@ -292,6 +292,7 @@ async def list_models(
     request: Request,
     current_user: User = Depends(get_user_flexible),
     antigravity_service: PluginAPIService = Depends(get_plugin_api_service),
+    qwen_service: QwenAPIService = Depends(get_qwen_api_service),
     kiro_service: KiroService = Depends(get_kiro_service),
     codex_service: CodexService = Depends(get_codex_service),
     gemini_cli_service: GeminiCLIAPIService = Depends(get_gemini_cli_api_service),
@@ -319,6 +320,7 @@ async def list_models(
         use_kiro = config_type == "kiro"
         use_codex = config_type == "codex"
         use_gemini_cli = config_type == "gemini-cli"
+        use_qwen = config_type == "qwen"
         
         if config_type in ("zai-image", "zai-tts"):
             result = {"object": "list", "data": []}
@@ -326,6 +328,8 @@ async def list_models(
             result = await codex_service.openai_list_models()
         elif use_gemini_cli:
             result = await gemini_cli_service.openai_list_models(user_id=current_user.id)
+        elif use_qwen:
+            result = qwen_service.openai_list_models()
         elif use_kiro:
             # 检查 beta 权限（管理员放行）
             if current_user.beta != 1 and getattr(current_user, "trust_level", 0) < 3:

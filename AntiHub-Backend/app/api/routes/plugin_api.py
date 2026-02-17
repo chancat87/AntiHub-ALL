@@ -7,12 +7,26 @@ import time
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 import httpx
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_user_from_api_key, get_plugin_api_service
+from app.api.deps import (
+    get_current_user,
+    get_user_from_api_key,
+    get_plugin_api_service,
+    get_qwen_api_service,
+    get_db_session,
+    get_redis,
+)
 from app.api.deps_flexible import get_user_flexible
+from app.cache import RedisClient
 from app.models.user import User
+from app.services.codex_service import CodexService
+from app.services.gemini_cli_api_service import GeminiCLIAPIService
+from app.services.kiro_service import KiroService
 from app.services.plugin_api_service import PluginAPIService
+from app.services.qwen_api_service import QwenAPIService
 from app.services.usage_log_service import UsageLogService, SSEUsageTracker, extract_openai_usage
+from app.services.zai_image_service import ZaiImageService
 from app.schemas.plugin_api import (
     PluginAPIKeyCreate,
     PluginAPIKeyResponse,
@@ -30,6 +44,8 @@ from app.schemas.plugin_api import (
     PluginAPIResponse,
     GenerateContentRequest,
 )
+
+from app.api.routes.v1 import chat_completions as v1_chat_completions
 
 
 router = APIRouter(prefix="/plugin-api", tags=["Plug-in API"])
@@ -638,15 +654,47 @@ async def get_quota_consumption(
     description="获取可用的AI模型列表"
 )
 async def get_models(
+    raw_request: Request,
     current_user: User = Depends(get_user_from_api_key),
-    service: PluginAPIService = Depends(get_plugin_api_service)
+    service: PluginAPIService = Depends(get_plugin_api_service),
+    qwen_service: QwenAPIService = Depends(get_qwen_api_service),
+    db: AsyncSession = Depends(get_db_session),
+    redis: RedisClient = Depends(get_redis),
 ):
     """获取模型列表"""
     try:
-        # 获取 config_type（通过 API key 认证时会设置）
-        config_type = getattr(current_user, '_config_type', None)
-        result = await service.get_models(current_user.id, config_type=config_type)
-        return result
+        config_type = getattr(current_user, "_config_type", None)
+        if config_type is None:
+            api_type = raw_request.headers.get("X-Api-Type")
+            if api_type in ["kiro", "antigravity", "qwen", "codex", "gemini-cli", "zai-image", "zai-tts"]:
+                config_type = api_type
+
+        effective_config_type = (config_type or "antigravity").strip().lower()
+
+        if effective_config_type in ("zai-image", "zai-tts"):
+            return {"object": "list", "data": []}
+
+        if effective_config_type == "codex":
+            codex_service = CodexService(db, redis)
+            return await codex_service.openai_list_models()
+
+        if effective_config_type == "gemini-cli":
+            gemini_cli_service = GeminiCLIAPIService(db, redis)
+            return await gemini_cli_service.openai_list_models(user_id=current_user.id)
+
+        if effective_config_type == "qwen":
+            return qwen_service.openai_list_models()
+
+        if effective_config_type == "kiro":
+            if current_user.beta != 1 and getattr(current_user, "trust_level", 0) < 3:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Kiro配置仅对beta计划用户开放",
+                )
+            kiro_service = KiroService(db, redis)
+            return await kiro_service.get_models(current_user.id)
+
+        return await service.get_models(current_user.id, config_type=effective_config_type)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -668,182 +716,27 @@ async def chat_completions(
     request: ChatCompletionRequest,
     raw_request: Request,
     current_user: User = Depends(get_user_from_api_key),
-    service: PluginAPIService = Depends(get_plugin_api_service)
+    antigravity_service: PluginAPIService = Depends(get_plugin_api_service),
+    qwen_service: QwenAPIService = Depends(get_qwen_api_service),
+    db: AsyncSession = Depends(get_db_session),
+    redis: RedisClient = Depends(get_redis),
 ):
-    """聊天补全"""
-    start_time = time.monotonic()
-    endpoint = raw_request.url.path
-    method = raw_request.method
-    api_key_id = getattr(current_user, "_api_key_id", None)
-    model_name = getattr(request, "model", None)
-    request_json = request.model_dump()
+    kiro_service = KiroService(db, redis)
+    codex_service = CodexService(db, redis)
+    gemini_cli_service = GeminiCLIAPIService(db, redis)
+    zai_image_service = ZaiImageService(db)
 
-    config_type = getattr(current_user, "_config_type", None)
-    effective_config_type = config_type or "antigravity"
-
-    try:
-        extra_headers: dict[str, str] = {}
-        if config_type:
-            extra_headers["X-Account-Type"] = config_type
-
-        if request.stream:
-            tracker = SSEUsageTracker()
-
-            async def generate():
-                try:
-                    async for chunk in service.proxy_stream_request(
-                        user_id=current_user.id,
-                        method="POST",
-                        path="/v1/chat/completions",
-                        json_data=request_json,
-                        extra_headers=extra_headers if extra_headers else None,
-                    ):
-                        tracker.feed(chunk)
-                        yield chunk
-                except Exception as e:
-                    tracker.success = False
-                    tracker.status_code = tracker.status_code or 500
-                    tracker.error_message = str(e)
-                    raise
-                finally:
-                    tracker.finalize()
-                    duration_ms = int((time.monotonic() - start_time) * 1000)
-                    await UsageLogService.record(
-                        user_id=current_user.id,
-                        api_key_id=api_key_id,
-                        endpoint=endpoint,
-                        method=method,
-                        model_name=model_name,
-                        config_type=effective_config_type,
-                        stream=True,
-                        input_tokens=tracker.input_tokens,
-                        output_tokens=tracker.output_tokens,
-                        cached_tokens=tracker.cached_tokens,
-                        total_tokens=tracker.total_tokens,
-                        success=tracker.success,
-                        status_code=tracker.status_code,
-                        error_message=tracker.error_message,
-                        duration_ms=duration_ms,
-                        client_app=raw_request.headers.get("X-App"),
-                        request_headers=raw_request.headers,
-                        request_body=request_json,
-                    )
-
-            return StreamingResponse(generate(), media_type="text/event-stream")
-
-        result = await service.proxy_request(
-            user_id=current_user.id,
-            method="POST",
-            path="/v1/chat/completions",
-            json_data=request_json,
-            extra_headers=extra_headers if extra_headers else None,
-        )
-
-        in_tok, out_tok, total_tok = extract_openai_usage(result)
-        duration_ms = int((time.monotonic() - start_time) * 1000)
-        await UsageLogService.record(
-            user_id=current_user.id,
-            api_key_id=api_key_id,
-            endpoint=endpoint,
-            method=method,
-            model_name=model_name,
-            config_type=effective_config_type,
-            stream=False,
-            input_tokens=in_tok,
-            output_tokens=out_tok,
-            total_tokens=total_tok,
-            success=True,
-            status_code=200,
-            duration_ms=duration_ms,
-            client_app=raw_request.headers.get("X-App"),
-            request_headers=raw_request.headers,
-            request_body=request_json,
-        )
-        return result
-    except ValueError as e:
-        duration_ms = int((time.monotonic() - start_time) * 1000)
-        await UsageLogService.record(
-            user_id=current_user.id,
-            api_key_id=api_key_id,
-            endpoint=endpoint,
-            method=method,
-            model_name=model_name,
-            config_type=effective_config_type,
-            stream=bool(request.stream),
-            success=False,
-            status_code=status.HTTP_400_BAD_REQUEST,
-            error_message=str(e),
-            duration_ms=duration_ms,
-            client_app=raw_request.headers.get("X-App"),
-            request_headers=raw_request.headers,
-            request_body=request_json,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
-    except httpx.HTTPStatusError as e:
-        duration_ms = int((time.monotonic() - start_time) * 1000)
-        upstream_response = getattr(e, "response_data", None)
-        if upstream_response is None:
-            try:
-                upstream_response = e.response.json()
-            except Exception:
-                upstream_response = {"error": e.response.text}
-
-        error_message = None
-        if isinstance(upstream_response, dict):
-            error_message = (
-                upstream_response.get("detail")
-                or upstream_response.get("error")
-                or upstream_response.get("message")
-                or str(upstream_response)
-            )
-        else:
-            error_message = str(upstream_response)
-
-        await UsageLogService.record(
-            user_id=current_user.id,
-            api_key_id=api_key_id,
-            endpoint=endpoint,
-            method=method,
-            model_name=model_name,
-            config_type=effective_config_type,
-            stream=bool(request.stream),
-            success=False,
-            status_code=e.response.status_code,
-            error_message=error_message,
-            duration_ms=duration_ms,
-            client_app=raw_request.headers.get("X-App"),
-            request_headers=raw_request.headers,
-            request_body=request_json,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="聊天补全失败",
-        )
-    except Exception as e:
-        duration_ms = int((time.monotonic() - start_time) * 1000)
-        await UsageLogService.record(
-            user_id=current_user.id,
-            api_key_id=api_key_id,
-            endpoint=endpoint,
-            method=method,
-            model_name=model_name,
-            config_type=effective_config_type,
-            stream=bool(request.stream),
-            success=False,
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            error_message=str(e),
-            duration_ms=duration_ms,
-            client_app=raw_request.headers.get("X-App"),
-            request_headers=raw_request.headers,
-            request_body=request_json,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"聊天补全失败"
-        )
+    return await v1_chat_completions(
+        request=request,
+        raw_request=raw_request,
+        current_user=current_user,
+        antigravity_service=antigravity_service,
+        qwen_service=qwen_service,
+        kiro_service=kiro_service,
+        codex_service=codex_service,
+        gemini_cli_service=gemini_cli_service,
+        zai_image_service=zai_image_service,
+    )
 
 
 # ==================== 用户设置 ====================
@@ -897,6 +790,7 @@ async def update_cookie_preference(
 async def generate_content(
     model: str,
     request: GenerateContentRequest,
+    raw_request: Request,
     current_user: User = Depends(get_user_flexible),
     service: PluginAPIService = Depends(get_plugin_api_service)
 ):
@@ -961,7 +855,11 @@ async def generate_content(
     """
     try:
         # 获取 config_type（通过 API key 认证时会设置）
-        config_type = getattr(current_user, '_config_type', None)
+        config_type = getattr(current_user, "_config_type", None)
+        if config_type is None:
+            api_type = raw_request.headers.get("X-Api-Type") or raw_request.headers.get("X-Account-Type")
+            if isinstance(api_type, str) and api_type.strip():
+                config_type = api_type.strip()
         
         result = await service.generate_content(
             user_id=current_user.id,

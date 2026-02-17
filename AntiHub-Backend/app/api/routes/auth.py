@@ -7,12 +7,10 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from app.api.deps import (
     get_auth_service,
     get_user_service,
-    get_plugin_api_service,
     get_current_user,
 )
 from app.services.auth_service import AuthService
 from app.services.user_service import UserService
-from app.services.plugin_api_service import PluginAPIService
 from app.models.user import User
 from app.schemas.auth import (
     LoginRequest,
@@ -48,7 +46,6 @@ router = APIRouter(prefix="/auth", tags=["认证"])
 async def login(
     request: LoginRequest,
     auth_service: AuthService = Depends(get_auth_service),
-    plugin_api_service: PluginAPIService = Depends(get_plugin_api_service)
 ):
     """
     传统用户名密码登录
@@ -65,20 +62,6 @@ async def login(
             username=request.username,
             password=request.password
         )
-
-        # 自动创建 plug-in-api 账号并绑定（仅对没有密钥的用户）
-        try:
-            has_key = await plugin_api_service.repo.exists(user.id)
-            if not has_key:
-                result = await plugin_api_service.auto_create_and_bind_plugin_user(
-                    user_id=user.id,
-                    username=user.username,
-                    prefer_shared=0  # 默认专属优先
-                )
-                print(f"✅ 自动创建plug-in账号成功: user_id={user.id}, plugin_user_id={result.plugin_user_id}")
-        except Exception as e:
-            # 记录错误但不影响登录流程
-            print(f"❌ 自动创建plug-in账号失败: {e}")
 
         # 返回响应
         return LoginResponse(

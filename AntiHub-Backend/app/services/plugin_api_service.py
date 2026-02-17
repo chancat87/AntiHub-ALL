@@ -41,6 +41,7 @@ from app.services.gemini_cli_api_service import (
     _openai_error_sse,
     _openai_request_to_gemini_cli_payload,
 )
+from app.services.zai_image_service import ZaiImageService
 
 logger = logging.getLogger(__name__)
 
@@ -542,8 +543,8 @@ class PluginAPIService:
         cookie_id = self._cookie_id_from_refresh_token(normalized_refresh)
 
         # 防止重复导入同一个 refresh_token（cookie_id 唯一）
-        existing = await self._get_antigravity_account(user_id=user_id, cookie_id=cookie_id)
-        if existing:
+        existing = await self.db.execute(select(AntigravityAccount).where(AntigravityAccount.cookie_id == cookie_id))
+        if existing.scalar_one_or_none() is not None:
             raise ValueError(f"此Refresh Token已被导入: cookie_id={cookie_id}")
 
         expires_at_ms = int(time.time() * 1000) + int(expires_in or 0) * 1000
@@ -841,6 +842,16 @@ class PluginAPIService:
             request_data=request_data,
         ):
             yield chunk
+
+    async def openai_chat_completions(self, *, user_id: int, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        OpenAI 兼容 /v1/chat/completions（非 stream）
+
+        说明：
+        - Backend 内部直连 Antigravity（不再依赖 AntiHub-plugin 运行时）
+        - 返回标准 OpenAI chat.completions JSON
+        """
+        return await self._antigravity_openai_chat_completions(user_id=user_id, request_data=request_data)
     
     # ==================== 密钥管理 ====================
     
@@ -1247,28 +1258,78 @@ class PluginAPIService:
         user_id: int,
         is_shared: int = 0
     ) -> Dict[str, Any]:
-        """获取OAuth授权URL"""
-        return await self.proxy_request(
-            user_id=user_id,
-            method="POST",
-            path="/api/oauth/authorize",
-            json_data={
-                "is_shared": is_shared
-            }
-        )
+        """获取 Google OAuth 授权 URL（Antigravity）"""
+        if is_shared not in (0, 1):
+            raise ValueError("is_shared必须是0或1")
+        if is_shared == 1:
+            raise ValueError("合并后不支持共享账号（is_shared=1）")
+
+        state = await self._store_antigravity_oauth_state(user_id=user_id, is_shared=is_shared)
+        params = {
+            "access_type": "offline",
+            "client_id": ANTIGRAVITY_OAUTH_CLIENT_ID,
+            "prompt": "consent",
+            "redirect_uri": ANTIGRAVITY_OAUTH_REDIRECT_URI,
+            "response_type": "code",
+            "scope": ANTIGRAVITY_OAUTH_SCOPE,
+            "state": state,
+        }
+        auth_url = f"{GOOGLE_AUTH_URL}?{urlencode(params)}"
+        return {"success": True, "data": {"auth_url": auth_url, "state": state, "expires_in": ANTIGRAVITY_OAUTH_STATE_TTL_SECONDS}}
     
     async def submit_oauth_callback(
         self,
         user_id: int,
         callback_url: str
     ) -> Dict[str, Any]:
-        """提交OAuth回调"""
-        return await self.proxy_request(
-            user_id=user_id,
-            method="POST",
-            path="/api/oauth/callback/manual",
-            json_data={"callback_url": callback_url}
-        )
+        """提交 OAuth 回调 URL 并导入 Antigravity 账号（无需 plug-in 服务）"""
+        parsed = self._parse_google_oauth_callback(callback_url)
+        state = parsed.get("state") or ""
+        code = parsed.get("code") or ""
+        if not state or not code:
+            raise ValueError("回调URL中缺少code或state参数")
+
+        state_key = self._antigravity_oauth_state_key(state)
+        state_info = await self.redis.get_json(state_key)
+        if not isinstance(state_info, dict):
+            raise ValueError("Invalid or expired state parameter")
+
+        try:
+            state_user_id = int(state_info.get("user_id") or 0)
+        except Exception:
+            state_user_id = 0
+        try:
+            is_shared = int(state_info.get("is_shared") or 0)
+        except Exception:
+            is_shared = 0
+
+        if state_user_id and int(state_user_id) != int(user_id):
+            raise ValueError("state 不属于当前用户")
+
+        try:
+            token_data = await self._exchange_code_for_token(code=code)
+            refresh_token = (token_data.get("refresh_token") or "").strip() if isinstance(token_data, dict) else ""
+            if not refresh_token:
+                raise ValueError("未获取到refresh_token，请撤销授权后重新授权（需要 access_type=offline + prompt=consent）")
+            access_token = (token_data.get("access_token") or "").strip() if isinstance(token_data, dict) else ""
+            try:
+                expires_in = int(token_data.get("expires_in") or 0) if isinstance(token_data, dict) else 0
+            except Exception:
+                expires_in = 0
+
+            account = await self._create_account_from_tokens(
+                user_id=user_id,
+                is_shared=is_shared,
+                access_token=access_token,
+                refresh_token=refresh_token,
+                expires_in=expires_in,
+            )
+            return {"success": True, "message": "账号添加成功", "data": self._serialize_antigravity_account(account)}
+        finally:
+            try:
+                await self.redis.delete(state_key)
+            except Exception:
+                pass
     
     async def get_accounts(self, user_id: int) -> Dict[str, Any]:
         """
@@ -1305,45 +1366,25 @@ class PluginAPIService:
         if is_shared == 1:
             raise ValueError("合并后不支持共享账号（is_shared=1）")
 
-        cookie_id = str(uuid4())
-        credentials_payload = {
-            "type": "antigravity",
-            "cookie_id": cookie_id,
-            "is_shared": 0,
-            "access_token": None,
-            "refresh_token": refresh_token.strip(),
-            "expires_at": None,
-            # report 约定：保留原始 ms 值（如有）；此处导入阶段未知
-            "expires_at_ms": None,
-        }
+        normalized_refresh = refresh_token.strip()
+        token_data = await self._refresh_access_token(refresh_token=normalized_refresh)
+        access_token = (token_data.get("access_token") or "").strip() if isinstance(token_data, dict) else ""
+        if not access_token:
+            raise ValueError("refresh_token 未返回 access_token")
+        try:
+            expires_in = int(token_data.get("expires_in") or 0) if isinstance(token_data, dict) else 0
+        except Exception:
+            expires_in = 0
 
-        encrypted_credentials = encrypt_api_key(json.dumps(credentials_payload, ensure_ascii=False))
-
-        account = AntigravityAccount(
+        account = await self._create_account_from_tokens(
             user_id=user_id,
-            cookie_id=cookie_id,
-            account_name="Imported",
-            email=None,
-            project_id_0=None,
-            status=1,
-            need_refresh=False,
-            is_restricted=False,
-            paid_tier=None,
-            ineligible=False,
-            token_expires_at=None,
-            last_refresh_at=None,
-            last_used_at=None,
-            credentials=encrypted_credentials,
+            is_shared=is_shared,
+            access_token=access_token,
+            refresh_token=normalized_refresh,
+            expires_in=expires_in,
         )
-        self.db.add(account)
-        await self.db.flush()
-        await self.db.refresh(account)
 
-        return {
-            "success": True,
-            "message": "账号导入成功",
-            "data": self._serialize_antigravity_account(account),
-        }
+        return {"success": True, "message": "账号导入成功", "data": self._serialize_antigravity_account(account)}
     
     async def get_account(self, user_id: int, cookie_id: str) -> Dict[str, Any]:
         """获取单个账号信息"""
@@ -1662,40 +1703,11 @@ class PluginAPIService:
         raise ValueError("配额消耗记录已弃用")
     
     async def get_models(self, user_id: int, config_type: Optional[str] = None) -> Dict[str, Any]:
-        """获取可用模型列表"""
-        extra_headers = {}
-        if config_type:
-            extra_headers["X-Account-Type"] = config_type
-        print(f"Using config_type header: {config_type}")
-        
-        return await self.proxy_request(
-            user_id=user_id,
-            method="GET",
-            path="/v1/models",
-            extra_headers=extra_headers if extra_headers else None
-        )
-    
-    async def update_cookie_preference(
-        self,
-        user_id: int,
-        plugin_user_id: str,
-        prefer_shared: int
-    ) -> Dict[str, Any]:
-        """更新Cookie优先级"""
-        return await self.proxy_request(
-            user_id=user_id,
-            method="PUT",
-            path=f"/api/users/{plugin_user_id}/preference",
-            json_data={"prefer_shared": prefer_shared}
-        )
-    
-    async def get_user_info(self, user_id: int) -> Dict[str, Any]:
-        """获取用户信息"""
-        return await self.proxy_request(
-            user_id=user_id,
-            method="GET",
-            path="/api/user/me"
-        )
+        """获取可用模型列表（Antigravity 直连，不再依赖 plug-in 服务）"""
+        normalized = (config_type or "").strip().lower() if isinstance(config_type, str) else ""
+        if normalized and normalized not in ("antigravity",):
+            raise ValueError(f"config_type 不支持: {normalized}")
+        return await self._antigravity_openai_list_models(user_id=user_id)
     
     async def update_model_quota_status(
         self,
@@ -1793,162 +1805,66 @@ class PluginAPIService:
         Returns:
             生成结果，包含candidates数组，每个candidate包含content.parts[0].inlineData
         """
-        # 构建请求路径
-        path = f"/v1beta/models/{model}:generateContent"
-        
-        # 准备额外的请求头
-        extra_headers = {}
-        if config_type:
-            extra_headers["X-Account-Type"] = config_type
-        
-        return await self.proxy_request(
-            user_id=user_id,
-            method="POST",
-            path=path,
-            json_data=request_data,
-            extra_headers=extra_headers if extra_headers else None
+        normalized = (config_type or "").strip().lower() if isinstance(config_type, str) else ""
+        if normalized != "zai-image":
+            raise ValueError("config_type must be zai-image")
+
+        # 解析 prompt（仅支持 text；不支持 inlineData 图生图）
+        contents = request_data.get("contents") if isinstance(request_data, dict) else None
+        if not isinstance(contents, list) or not contents:
+            raise ValueError("contents是必需的且必须是非空数组")
+
+        texts: list[str] = []
+        has_inline = False
+        for msg in contents:
+            if not isinstance(msg, dict):
+                continue
+            parts = msg.get("parts")
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                if "inlineData" in part:
+                    has_inline = True
+                t = part.get("text")
+                if isinstance(t, str) and t.strip():
+                    texts.append(t.strip())
+
+        if has_inline:
+            raise ValueError("暂不支持图生图（inlineData）")
+
+        prompt = "\n".join(texts).strip()
+        if not prompt:
+            raise ValueError("prompt 不能为空")
+
+        generation_cfg = request_data.get("generationConfig") if isinstance(request_data, dict) else None
+        image_cfg = generation_cfg.get("imageConfig") if isinstance(generation_cfg, dict) else None
+        ratio = image_cfg.get("aspectRatio") if isinstance(image_cfg, dict) else None
+        resolution = image_cfg.get("imageSize") if isinstance(image_cfg, dict) else None
+
+        zai = ZaiImageService(self.db)
+        account = await zai.select_active_account(user_id)
+        info = await zai.generate_image(
+            account=account,
+            prompt=prompt,
+            ratio=ratio,
+            resolution=resolution,
+            rm_label_watermark=True,
         )
-    
-    async def generate_content_stream(
-        self,
-        user_id: int,
-        model: str,
-        request_data: Dict[str, Any],
-        config_type: Optional[str] = None
-    ):
-        """
-        图片生成API流式版本（Gemini格式）
-        
-        调用非流式上游接口 /v1beta/models/{model}:generateContent，
-        但以SSE流式方式响应给用户，在等待上游响应时每20秒发送心跳。
-        
-        Args:
-            user_id: 用户ID
-            model: 模型名称
-            request_data: 请求数据
-            config_type: 账号类型（可选）
-            
-        Yields:
-            SSE格式的流式响应数据
-        """
-        # 获取用户的API密钥
-        api_key = await self.get_user_api_key(user_id)
-        if not api_key:
-            error_response = {
-                "error": {
-                    "message": "用户未配置plug-in API密钥",
-                    "type": "authentication_error",
-                    "code": 401
+        b64, mime = await zai.fetch_image_base64(info["image_url"])
+
+        return {
+            "candidates": [
+                {
+                    "content": {
+                        "role": "model",
+                        "parts": [
+                            {"inlineData": {"mimeType": mime, "data": b64}},
+                            {"text": info["image_url"]},
+                        ],
+                    },
+                    "finishReason": "STOP",
                 }
-            }
-            yield f"event: error\ndata: {json.dumps(error_response)}\n\n"
-            return
-        
-        # 更新最后使用时间
-        await self.update_last_used(user_id)
-        
-        # 构建请求路径（非流式接口）
-        path = f"/v1beta/models/{model}:generateContent"
-        url = f"{self.base_url}{path}"
-        
-        # 准备请求头
-        headers = {"Authorization": f"Bearer {api_key}"}
-        if config_type:
-            headers["X-Account-Type"] = config_type
-        
-        # 心跳间隔（秒）
-        heartbeat_interval = 20
-        
-        async def make_request():
-            """发起上游请求"""
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    url,
-                    json=request_data,
-                    headers=headers,
-                    timeout=httpx.Timeout(1200.0, connect=60.0)
-                )
-                return response
-        
-        # 创建上游请求任务
-        request_task = asyncio.create_task(make_request())
-        
-        try:
-            while True:
-                try:
-                    # 等待请求完成，最多等待 heartbeat_interval 秒
-                    response = await asyncio.wait_for(
-                        asyncio.shield(request_task),
-                        timeout=heartbeat_interval
-                    )
-                    
-                    # 请求完成，处理响应
-                    if response.status_code >= 400:
-                        # 上游返回错误，转发错误
-                        try:
-                            error_data = response.json()
-                        except Exception:
-                            error_data = {"detail": response.text}
-                        
-                        logger.error(f"上游API返回错误: status={response.status_code}, url={url}, error={error_data}")
-                        
-                        # 提取错误消息
-                        error_message = None
-                        if isinstance(error_data, dict):
-                            if "detail" in error_data:
-                                error_message = error_data["detail"]
-                            elif "error" in error_data:
-                                error_field = error_data["error"]
-                                if isinstance(error_field, str):
-                                    error_message = error_field
-                                elif isinstance(error_field, dict):
-                                    error_message = error_field.get("message") or str(error_field)
-                                else:
-                                    error_message = str(error_field)
-                            elif "message" in error_data:
-                                error_message = error_data["message"]
-                        
-                        if not error_message:
-                            error_message = str(error_data)
-                        
-                        error_response = {
-                            "error": {
-                                "message": error_message,
-                                "type": "upstream_error",
-                                "code": response.status_code
-                            }
-                        }
-                        yield f"event: error\ndata: {json.dumps(error_response)}\n\n"
-                    else:
-                        # 成功响应，发送结果
-                        result_data = response.json()
-                        yield f"event: result\ndata: {json.dumps(result_data)}\n\n"
-                    
-                    # 请求完成，退出循环
-                    break
-                    
-                except asyncio.TimeoutError:
-                    # 超时，发送心跳
-                    heartbeat_data = {"status": "still generating"}
-                    yield f"event: heartbeat\ndata: {json.dumps(heartbeat_data)}\n\n"
-                    # 继续等待
-                    
-        except asyncio.CancelledError:
-            # 客户端断开连接，取消上游请求
-            request_task.cancel()
-            try:
-                await request_task
-            except asyncio.CancelledError:
-                pass
-            raise
-        except Exception as e:
-            # 其他异常
-            logger.error(f"图片生成流式请求失败: {str(e)}")
-            error_response = {
-                "error": {
-                    "message": str(e),
-                    "type": "internal_error",
-                    "code": 500
-                }
-            }
-            yield f"event: error\ndata: {json.dumps(error_response)}\n\n"
+            ]
+        }
