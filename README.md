@@ -54,6 +54,7 @@
 - 可选：管理员账号（`ADMIN_USERNAME` / `ADMIN_PASSWORD`，首次启动自动创建）
 - 可选：外部 PostgreSQL / Redis（如果你不想用 compose 自带的）
 - 可选：`KIRO_IDE_VERSION`（Kiro 请求 User-Agent 版本；默认内置 `0.9.2`）
+- 可选：`KIRO_PROXY_URL`（Kiro 上游代理；遇到 `Temporary failure in name resolution`/无法访问相关域名时使用）
 - 可选：`KIRO_USAGE_LIMITS_SYNC_INTERVAL_SECONDS` / `KIRO_USAGE_LIMITS_429_COOLDOWN_SECONDS`（Kiro 剩余额度同步节流；默认 300s，避免频繁调用 `/getUsageLimits` 触发 429）
 
 ## 一键部署

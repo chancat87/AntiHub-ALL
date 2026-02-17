@@ -1,6 +1,6 @@
 """
 Kiro账号管理API路由
-提供Kiro账号的管理操作，通过插件API实现
+提供Kiro账号的管理操作，由后端本地实现（不依赖 plug-in）
 """
 import secrets
 from typing import Optional
@@ -77,7 +77,7 @@ async def get_oauth_authorize_url(
 @router.post(
     "/oauth/callback",
     summary="提交 Kiro OAuth 回调 (AntiHook)",
-    description="用于桌面端 AntiHook 将 kiro:// 回调转发到服务器；后端会代理到 plug-in API 完成处理。"
+    description="用于桌面端 AntiHook 将 kiro:// 回调转发到服务器；后端解析 code/state 并换取 token 后落库。"
 )
 async def submit_oauth_callback(
     request: KiroOAuthCallbackRequest,
@@ -85,8 +85,8 @@ async def submit_oauth_callback(
 ):
     """
     AntiHook 回调入口（不需要用户鉴权）：
-    - OAuth state 信息由 plug-in API 在授权阶段写入 Redis
-    - callback 阶段只需要把 kiro:// 回调 URL 转发给 plug-in API 即可
+    - OAuth state 信息由后端在授权阶段写入 Redis
+    - callback 阶段由后端解析 kiro:// 回调 URL，使用 code+verifier 换 token 并落库 kiro_accounts
     """
     try:
         if not request.callback_url or not request.callback_url.lower().startswith("kiro://"):

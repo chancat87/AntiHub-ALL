@@ -173,6 +173,21 @@ async def _create_message_impl(
 
         # 如果是流式请求
         if request.stream:
+            # /v1/messages: message_start.input_tokens 是估算值（对齐 kiro.rs）
+            # /cc/v1/messages: 会在缓冲后用真实 usage 覆盖；这里作为兜底值
+            estimated_input_tokens = 0
+            try:
+                req_dump = request.model_dump()
+                estimated_input_tokens = int(
+                    count_all_tokens(
+                        messages=req_dump.get("messages", []),
+                        system=req_dump.get("system"),
+                        tools=req_dump.get("tools"),
+                    )
+                )
+            except Exception:
+                estimated_input_tokens = 0
+
             async def generate():
                 try:
                     if use_kiro:
@@ -202,6 +217,7 @@ async def _create_message_impl(
                         openai_stream,
                         model=request.model,
                         request_id=request_id,
+                        estimated_input_tokens=estimated_input_tokens,
                         thinking_enabled=thinking_enabled,
                     ):
                         yield event

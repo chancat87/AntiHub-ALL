@@ -44,8 +44,10 @@ class KiroAnthropicConverter:
     @classmethod
     def to_kiro_chat_completions_request(cls, request: AnthropicMessagesRequest) -> Dict[str, Any]:
         """
-        返回给 plug-in API 的请求体（仍走 /v1/kiro/chat/completions），但 payload 是 conversationState。
-        plug-in 会识别 `conversationState` 并直接转发到 /generateAssistantResponse。
+        将 Anthropic Messages 请求转换为 Kiro/CodeWhisperer 上游所需的 `conversationState` 结构。
+
+        该返回值会被 `KiroService.chat_completions(_stream)` 直接作为上游
+        `/generateAssistantResponse` 的请求体发送（后端直连，不再依赖 plug-in）。
         """
         if not request.messages:
             raise ValueError("messages 不能为空")
@@ -470,14 +472,15 @@ class KiroAnthropicConverter:
                     raw_content = getattr(block, "content", None) if not isinstance(block, dict) else block.get("content")
                     if isinstance(tool_use_id, str) and tool_use_id:
                         result_text = cls._extract_tool_result_text(raw_content)
-                        tool_results.append(
-                            {
-                                "toolUseId": tool_use_id,
-                                "content": [{"text": result_text}],
-                                "status": "error" if is_error else "success",
-                                "isError": bool(is_error),
-                            }
-                        )
+                        tool_result: Dict[str, Any] = {
+                            "toolUseId": tool_use_id,
+                            "content": [{"text": result_text}],
+                            "status": "error" if is_error else "success",
+                        }
+                        # Align kiro.rs: only include isError when true (skip_serializing_if = is_false).
+                        if is_error:
+                            tool_result["isError"] = True
+                        tool_results.append(tool_result)
 
         return "\n".join(text_parts), images, tool_results
 

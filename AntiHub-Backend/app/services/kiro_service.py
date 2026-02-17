@@ -4,21 +4,26 @@ Kiro账号服务
 当前实现：
 - 账号管理（/api/kiro/accounts 等）：使用 Backend DB（kiro_accounts）
 - 订阅层白名单（/api/kiro/admin/subscription-models）：使用 Backend DB（kiro_subscription_models）
-- OpenAI 兼容 /v1/kiro/*：仍保留兼容期的 proxy（通过 PLUGIN_API_BASE_URL 代理到历史 plug-in API）
+- OpenAI 兼容 /v1/kiro/*：后端直连 Kiro/Amazon Q 上游（不再依赖 plug-in）
 
 优化说明：
-- 添加 Redis 缓存以减少数据库查询
-- plugin_api_key 缓存 TTL 为 60 秒
+- OAuth state 存 Redis（短 TTL）
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple, AsyncIterator
 from uuid import uuid4
 
+import base64
+import hashlib
 import httpx
 import logging
 import json
+import re
+import secrets
+import time
+from urllib.parse import urlencode, urlparse, parse_qs
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,13 +32,15 @@ from app.cache import get_redis_client, RedisClient
 from app.core.config import get_settings
 from app.models.kiro_account import KiroAccount
 from app.models.kiro_subscription_model import KiroSubscriptionModel
-from app.repositories.plugin_api_key_repository import PluginAPIKeyRepository
+from app.services.kiro_anthropic_converter import KiroAnthropicConverter
 from app.utils.encryption import decrypt_api_key, encrypt_api_key
 
 logger = logging.getLogger(__name__)
 
-# 缓存 TTL（秒）
-PLUGIN_API_KEY_CACHE_TTL = 60
+# OAuth state TTLs (seconds)
+KIRO_OAUTH_STATE_TTL_SECONDS = 10 * 60
+KIRO_OAUTH_STATE_COMPLETED_TTL_SECONDS = 15 * 60
+KIRO_OAUTH_STATE_KEY_PREFIX = "kiro:oauth:"
 
 
 def _now_utc() -> datetime:
@@ -71,6 +78,22 @@ def _safe_json_load(text_value: Optional[str]) -> Optional[Any]:
         return json.loads(normalized)
     except Exception:
         return None
+
+
+def _openai_sse_data(payload: Any) -> bytes:
+    try:
+        text = json.dumps(payload, ensure_ascii=False)
+    except Exception:
+        text = json.dumps({"error": {"message": "serialize_error", "type": "upstream_error", "code": 500}})
+    return f"data: {text}\n\n".encode("utf-8")
+
+
+def _openai_sse_error(message: str, *, code: int = 500) -> bytes:
+    return _openai_sse_data({"error": {"message": str(message), "type": "upstream_error", "code": int(code)}})
+
+
+def _openai_sse_done() -> bytes:
+    return b"data: [DONE]\n\n"
 
 
 def _account_to_safe_dict(account: KiroAccount) -> Dict[str, Any]:
@@ -144,7 +167,7 @@ class UpstreamAPIError(Exception):
 
 
 class KiroService:
-    """Kiro账号服务类- 通过插件API管理"""
+    """Kiro账号服务类（后端本地实现）"""
     
     # 支持的Kiro模型列表
     SUPPORTED_MODELS = [
@@ -166,9 +189,6 @@ class KiroService:
         """
         self.db = db
         self.settings = get_settings()
-        self.plugin_api_key_repo = PluginAPIKeyRepository(db)
-        self.base_url = self.settings.plugin_api_base_url
-        self.admin_key = self.settings.plugin_api_admin_key
         self._redis = redis
     
     @property
@@ -178,222 +198,96 @@ class KiroService:
             self._redis = get_redis_client()
         return self._redis
     
-    def _get_cache_key(self, user_id: int) -> str:
-        """生成缓存键"""
-        return f"plugin_api_key:{user_id}"
-    
-    async def _get_user_plugin_key(self, user_id: int) -> str:
-        """
-        获取用户的插件API密钥
-        
-        优化：使用 Redis 缓存减少数据库查询
-        
-        Args:
-            user_id: 用户ID
-            
-        Returns:
-            解密后的插件API密钥
-        """
-        cache_key = self._get_cache_key(user_id)
-        
-        # 尝试从缓存获取
-        try:
-            cached_key = await self.redis.get(cache_key)
-            if cached_key:
-                logger.debug(f"从缓存获取 plugin_api_key (kiro): user_id={user_id}")
-                return cached_key
-        except Exception as e:
-            logger.warning(f"Redis 缓存读取失败: {e}")
-        
-        # 缓存未命中，从数据库获取
-        key_record = await self.plugin_api_key_repo.get_by_user_id(user_id)
-        if not key_record or not key_record.is_active:
-            raise ValueError("用户未配置插件API密钥")
-        
-        # 解密
-        decrypted_key = decrypt_api_key(key_record.api_key)
-        
-        # 存入缓存
-        try:
-            await self.redis.set(cache_key, decrypted_key, expire=PLUGIN_API_KEY_CACHE_TTL)
-            logger.debug(f"plugin_api_key 已缓存 (kiro): user_id={user_id}, ttl={PLUGIN_API_KEY_CACHE_TTL}s")
-        except Exception as e:
-            logger.warning(f"Redis 缓存写入失败: {e}")
-        
-        return decrypted_key
-    
-    async def _proxy_request(
-        self,
-        user_id: int,
-        method: str,
-        path: str,
-        json_data: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """
-        代理请求到插件API的Kiro端点
-        
-        Args:
-            user_id: 用户ID
-            method: HTTP方法
-            path: API路径
-            json_data: JSON数据
-            params: 查询参数
-            
-        Returns:
-            API响应
-            
-        Raises:
-            UpstreamAPIError: 当上游API返回错误时
-        """
-        api_key = await self._get_user_plugin_key(user_id)
-        url = f"{self.base_url}{path}"
-        headers = {"Authorization": f"Bearer {api_key}"}
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.request(
-                method=method,
-                url=url,
-                json=json_data,
-                params=params,
-                headers=headers,
-                timeout=1200.0
-            )
-            
-            if response.status_code >= 400:
-                # 尝试解析上游错误响应
-                upstream_response = None
-                try:
-                    upstream_response = response.json()
-                except Exception:
-                    try:
-                        upstream_response = {"raw": response.text}
-                    except Exception:
-                        pass
-                
-                logger.warning(
-                    f"上游API错误: status={response.status_code}, "
-                    f"url={url}, response={upstream_response}"
-                )
-                
-                raise UpstreamAPIError(
-                    status_code=response.status_code,
-                    message=f"上游API返回错误: {response.status_code}",
-                    upstream_response=upstream_response
-                )
-            
-            return response.json()
-    
-    async def _proxy_admin_request(
-        self,
-        method: str,
-        path: str,
-        json_data: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """
-        使用管理员 Key 代理请求到 plug-in API
+    # ==================== Kiro OAuth（Social: Google/Github）====================
 
-        用途：全局配置类接口（不绑定具体用户 plug-in key）
-        """
-        if not self.admin_key:
-            raise ValueError("未配置 PLUGIN_API_ADMIN_KEY，无法调用 plug-in 管理接口")
+    def _kiro_oauth_state_key(self, state: str) -> str:
+        return f"{KIRO_OAUTH_STATE_KEY_PREFIX}{state}"
 
-        url = f"{self.base_url}{path}"
-        headers = {"Authorization": f"Bearer {self.admin_key}"}
+    @staticmethod
+    def _normalize_kiro_oauth_provider(provider: str) -> str:
+        p = str(provider or "").strip()
+        if not p:
+            raise ValueError("provider is required")
+        lower = p.lower()
+        if lower in ("google", "goog"):
+            return "Google"
+        if lower in ("github", "gh"):
+            return "Github"
+        raise ValueError("provider must be Google or Github")
 
-        async with httpx.AsyncClient() as client:
-            response = await client.request(
-                method=method,
-                url=url,
-                json=json_data,
-                params=params,
-                headers=headers,
-                timeout=1200.0,
-            )
+    @staticmethod
+    def _generate_pkce_verifier() -> str:
+        # PKCE code_verifier should be 43-128 chars, URL-safe.
+        verifier = secrets.token_urlsafe(48)
+        return verifier[:128]
 
-            if response.status_code >= 400:
-                upstream_response = None
-                try:
-                    upstream_response = response.json()
-                except Exception:
-                    try:
-                        upstream_response = {"raw": response.text}
-                    except Exception:
-                        pass
+    @classmethod
+    def _pkce_challenge(cls, verifier: str) -> str:
+        digest = hashlib.sha256(verifier.encode("utf-8")).digest()
+        return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
-                logger.warning(
-                    f"plug-in admin API错误: status={response.status_code}, url={url}, response={upstream_response}"
-                )
+    @staticmethod
+    def _parse_kiro_oauth_callback(callback_url: str) -> Dict[str, str]:
+        trimmed = (callback_url or "").strip()
+        if not trimmed:
+            raise ValueError("callback_url is empty")
 
-                raise UpstreamAPIError(
-                    status_code=response.status_code,
-                    message=f"plug-in admin API返回错误: {response.status_code}",
-                    upstream_response=upstream_response,
-                )
+        candidate = trimmed
+        if "://" not in candidate:
+            if candidate.startswith("?"):
+                candidate = "kiro://oauth/callback" + candidate
+            elif "=" in candidate:
+                candidate = "kiro://oauth/callback?" + candidate
+            else:
+                raise ValueError("callback_url is not a valid URL or query")
 
-            return response.json()
+        parsed = urlparse(candidate)
+        q = parse_qs(parsed.query or "")
+        # Some providers may put params in fragment (#code=...&state=...)
+        if (not q) and parsed.fragment:
+            q = parse_qs(parsed.fragment)
 
-    async def _proxy_stream_request(
-        self,
-        user_id: int,
-        method: str,
-        path: str,
-        json_data: Optional[Dict[str, Any]] = None
-    ):
-        """
-        代理流式请求到插件API的Kiro端点
-        
-        Args:
-            user_id: 用户ID
-            method: HTTP方法
-            path: API路径
-            json_data: JSON数据
-            
-        Yields:
-            流式响应数据
-            
-        Raises:
-            UpstreamAPIError: 当上游API返回错误时
-        """
-        api_key = await self._get_user_plugin_key(user_id)
-        url = f"{self.base_url}{path}"
-        headers = {"Authorization": f"Bearer {api_key}"}
-        
-        async with httpx.AsyncClient() as client:
-            async with client.stream(
-                method=method,
-                url=url,
-                json=json_data,
-                headers=headers,
-                timeout=httpx.Timeout(1200.0, connect=60.0)
-            ) as response:
-                if response.status_code >= 400:
-                    # 读取错误响应体
-                    error_body = await response.aread()
-                    upstream_response = None
-                    try:
-                        upstream_response = json.loads(error_body.decode('utf-8'))
-                    except Exception:
-                        try:
-                            upstream_response = {"raw": error_body.decode('utf-8')}
-                        except Exception:
-                            upstream_response = {"raw": str(error_body)}
-                    
-                    logger.warning(
-                        f"上游API流式请求错误: status={response.status_code}, "
-                        f"url={url}, response={upstream_response}"
-                    )
-                    
-                    raise UpstreamAPIError(
-                        status_code=response.status_code,
-                        message=f"上游API返回错误: {response.status_code}",
-                        upstream_response=upstream_response
-                    )
-                
-                async for chunk in response.aiter_raw():
-                    if chunk:
-                        yield chunk
+        code = (q.get("code", [""])[0] or "").strip()
+        state = (q.get("state", [""])[0] or "").strip()
+        err = (q.get("error", [""])[0] or "").strip()
+        err_desc = (q.get("error_description", [""])[0] or "").strip()
+        if not err and err_desc:
+            err = err_desc
+
+        if err:
+            raise ValueError(f"OAuth failed: {err}")
+        if not code or not state:
+            raise ValueError("callback_url missing code/state")
+
+        return {"code": code, "state": state}
+
+    @staticmethod
+    def _kiro_auth_base_url(region: str) -> str:
+        r = str(region or "").strip() or "us-east-1"
+        return f"https://prod.{r}.auth.desktop.kiro.dev"
+
+    @classmethod
+    def _build_kiro_social_authorize_url(
+        cls,
+        *,
+        provider: str,
+        redirect_uri: str,
+        code_challenge: str,
+        state: str,
+        region: str,
+    ) -> str:
+        base = cls._kiro_auth_base_url(region)
+        query = urlencode(
+            {
+                "idp": provider,
+                "redirect_uri": redirect_uri,
+                "code_challenge": code_challenge,
+                "code_challenge_method": "S256",
+                "state": state,
+                "prompt": "select_account",
+            }
+        )
+        return f"{base}/login?{query}"
     
     #==================== Kiro账号管理 ====================
     
@@ -403,63 +297,210 @@ class KiroService:
         provider: str,
         is_shared: int = 0
     ) -> Dict[str, Any]:
-        """获取Kiro OAuth授权URL（通过插件API）"""
-        return await self._proxy_request(
-            user_id=user_id,
-            method="POST",
-            path="/api/kiro/oauth/authorize",
-            json_data={
-                "provider": provider,
-                "is_shared": is_shared
-            }
+        """获取 Kiro Social OAuth 授权 URL（后端本地实现）。"""
+        provider_norm = self._normalize_kiro_oauth_provider(provider)
+
+        try:
+            is_shared_int = int(is_shared)
+        except Exception:
+            raise ValueError("is_shared must be 0 or 1")
+        if is_shared_int not in (0, 1):
+            raise ValueError("is_shared must be 0 or 1")
+
+        region = "us-east-1"
+        redirect_uri = "kiro://oauth/callback"
+        code_verifier = self._generate_pkce_verifier()
+        code_challenge = self._pkce_challenge(code_verifier)
+        state = f"kiro-{secrets.token_hex(16)}"
+        machineid = secrets.token_hex(32)
+
+        auth_url = self._build_kiro_social_authorize_url(
+            provider=provider_norm,
+            redirect_uri=redirect_uri,
+            code_challenge=code_challenge,
+            state=state,
+            region=region,
         )
-    
+
+        now_ms = int(time.time() * 1000)
+        state_payload = {
+            "status": "pending",
+            "user_id": int(user_id),
+            "is_shared": int(is_shared_int),
+            "provider": provider_norm,
+            "region": region,
+            "redirect_uri": redirect_uri,
+            "code_verifier": code_verifier,
+            "machineid": machineid,
+            "created_at_ms": now_ms,
+            "expires_at_ms": now_ms + KIRO_OAUTH_STATE_TTL_SECONDS * 1000,
+        }
+        await self.redis.set_json(self._kiro_oauth_state_key(state), state_payload, expire=KIRO_OAUTH_STATE_TTL_SECONDS)
+
+        return {
+            "success": True,
+            "data": {"auth_url": auth_url, "state": state, "expires_in": KIRO_OAUTH_STATE_TTL_SECONDS},
+        }
+
     async def get_oauth_status(self, user_id: int, state: str) -> Dict[str, Any]:
-        """轮询Kiro OAuth授权状态（通过插件API）"""
-        return await self._proxy_request(
-            user_id=user_id,
-            method="GET",
-            path=f"/api/kiro/oauth/status/{state}"
-        )
-    
+        """轮询 Kiro OAuth 授权状态（后端本地实现）。"""
+        key = self._kiro_oauth_state_key(state)
+        info = await self.redis.get_json(key)
+        if not isinstance(info, dict):
+            return {"success": False, "status": "expired", "message": "state expired"}
+
+        if int(info.get("user_id") or 0) != int(user_id):
+            # 不泄漏其他用户的 state 是否存在
+            return {"success": False, "status": "expired", "message": "state expired"}
+
+        status_val = str(info.get("status") or "pending").strip().lower()
+        if status_val == "completed":
+            return {"success": True, "status": "completed", "data": info.get("account")}
+        if status_val in ("failed", "error"):
+            return {"success": False, "status": "failed", "message": info.get("error") or "OAuth failed"}
+
+        expires_at_ms = int(info.get("expires_at_ms") or 0)
+        now_ms = int(time.time() * 1000)
+        if expires_at_ms and now_ms >= expires_at_ms:
+            await self.redis.delete(key)
+            return {"success": False, "status": "expired", "message": "state expired"}
+
+        return {"success": True, "status": "pending", "message": "waiting for authorization"}
+
     async def submit_oauth_callback(self, callback_url: str) -> Dict[str, Any]:
         """
         提交 Kiro OAuth 回调（给 AntiHook 用）。
 
         说明：
-        - Kiro OAuth 的 state 信息在 plug-in API 的 authorize 阶段写入 Redis；
-        - callback 阶段 plug-in API 本身不要求鉴权（没有用户 token 也能完成），因此这里直接代理即可。
+        - authorize 阶段写入 Redis：state -> user_id / is_shared / code_verifier / redirect_uri / machineid
+        - callback 阶段由 AntiHook 转发 kiro:// 回调 URL 到此接口；后端用 code+verifier 换 token 并落库
         """
-        url = f"{self.base_url}/api/kiro/oauth/callback"
+        try:
+            parsed = self._parse_kiro_oauth_callback(callback_url)
+        except Exception as e:
+            raise UpstreamAPIError(status_code=400, message=str(e))
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                url=url,
-                json={"callback_url": callback_url},
-                timeout=1200.0,
+        state = parsed["state"]
+        code = parsed["code"]
+        key = self._kiro_oauth_state_key(state)
+        info = await self.redis.get_json(key)
+        if not isinstance(info, dict):
+            raise UpstreamAPIError(status_code=404, message="state expired")
+
+        status_val = str(info.get("status") or "pending").strip().lower()
+        if status_val == "completed":
+            return {"success": True, "message": "already completed", "data": info.get("account")}
+
+        user_id = int(info.get("user_id") or 0)
+        if user_id <= 0:
+            await self.redis.set_json(
+                key,
+                {**info, "status": "failed", "error": "invalid user_id"},
+                expire=KIRO_OAUTH_STATE_COMPLETED_TTL_SECONDS,
             )
+            raise UpstreamAPIError(status_code=400, message="invalid user_id")
 
-        if response.status_code >= 400:
-            upstream_response = None
-            try:
-                upstream_response = response.json()
-            except Exception:
-                try:
-                    upstream_response = {"raw": response.text}
-                except Exception:
-                    pass
-
-            logger.warning(
-                f"上游API错误: status={response.status_code}, url={url}, response={upstream_response}"
+        region = str(info.get("region") or "us-east-1").strip() or "us-east-1"
+        redirect_uri = str(info.get("redirect_uri") or "kiro://oauth/callback").strip()
+        code_verifier = str(info.get("code_verifier") or "").strip()
+        if not code_verifier:
+            await self.redis.set_json(
+                key,
+                {**info, "status": "failed", "error": "missing code_verifier"},
+                expire=KIRO_OAUTH_STATE_COMPLETED_TTL_SECONDS,
             )
+            raise UpstreamAPIError(status_code=400, message="missing code_verifier")
 
-            raise UpstreamAPIError(
-                status_code=response.status_code,
-                message=f"上游API返回错误: {response.status_code}",
-                upstream_response=upstream_response,
+        token_url = f"{self._kiro_auth_base_url(region)}/oauth/token"
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "AntiHub-Backend/kiro-oauth",
+            "Accept": "application/json",
+        }
+        payload = {"code": code, "code_verifier": code_verifier, "redirect_uri": redirect_uri}
+
+        proxy_url = self._get_kiro_proxy_url()
+        client_kwargs: Dict[str, Any] = {"timeout": httpx.Timeout(30.0, connect=10.0)}
+        if proxy_url:
+            client_kwargs["proxies"] = proxy_url
+
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            resp = await client.post(token_url, json=payload, headers=headers)
+
+        try:
+            token_data: Any = resp.json() if resp.content else {}
+        except Exception:
+            token_data = {"raw": resp.text}
+
+        if resp.status_code >= 400:
+            err_msg = None
+            if isinstance(token_data, dict):
+                err_msg = token_data.get("error") or token_data.get("message") or token_data.get("detail")
+            err_text = str(err_msg or resp.text or "").strip()[:2000] or f"HTTP {resp.status_code}"
+            await self.redis.set_json(
+                key,
+                {**info, "status": "failed", "error": err_text},
+                expire=KIRO_OAUTH_STATE_COMPLETED_TTL_SECONDS,
             )
+            raise UpstreamAPIError(status_code=resp.status_code, message=f"token exchange failed: {err_text}")
 
-        return response.json()
+        if not isinstance(token_data, dict):
+            await self.redis.set_json(
+                key,
+                {**info, "status": "failed", "error": "invalid token response"},
+                expire=KIRO_OAUTH_STATE_COMPLETED_TTL_SECONDS,
+            )
+            raise UpstreamAPIError(status_code=500, message="invalid token response")
+
+        access_token = _trimmed_str(token_data.get("accessToken") or token_data.get("access_token"))
+        refresh_token = _trimmed_str(token_data.get("refreshToken") or token_data.get("refresh_token"))
+        profile_arn = _trimmed_str(token_data.get("profileArn") or token_data.get("profile_arn")) or None
+        expires_in = token_data.get("expiresIn") if isinstance(token_data.get("expiresIn"), int) else None
+
+        if not refresh_token:
+            await self.redis.set_json(
+                key,
+                {**info, "status": "failed", "error": "missing refreshToken"},
+                expire=KIRO_OAUTH_STATE_COMPLETED_TTL_SECONDS,
+            )
+            raise UpstreamAPIError(status_code=500, message="token response missing refreshToken")
+
+        account_payload: Dict[str, Any] = {
+            "account_name": f"Kiro OAuth ({info.get('provider') or 'Social'})",
+            "auth_method": "Social",
+            "refresh_token": refresh_token,
+            "access_token": access_token,
+            "profile_arn": profile_arn,
+            "machineid": info.get("machineid") or secrets.token_hex(32),
+            "region": region,
+            "is_shared": int(info.get("is_shared") or 0),
+        }
+        if expires_in:
+            account_payload["expires_in"] = expires_in
+
+        try:
+            result = await self.create_account(user_id, account_payload)
+        except UpstreamAPIError as e:
+            await self.redis.set_json(
+                key,
+                {**info, "status": "failed", "error": e.extracted_message},
+                expire=KIRO_OAUTH_STATE_COMPLETED_TTL_SECONDS,
+            )
+            raise
+
+        safe_account = result.get("data") if isinstance(result, dict) else None
+        now_ms = int(time.time() * 1000)
+        safe_state = {
+            "status": "completed",
+            "user_id": info.get("user_id"),
+            "is_shared": info.get("is_shared"),
+            "provider": info.get("provider"),
+            "created_at_ms": info.get("created_at_ms"),
+            "completed_at_ms": now_ms,
+            "account": safe_account,
+        }
+        await self.redis.set_json(key, safe_state, expire=KIRO_OAUTH_STATE_COMPLETED_TTL_SECONDS)
+        return {"success": True, "message": "OAuth completed", "data": safe_account}
 
     async def _get_account_by_id(self, account_id: str) -> Optional[KiroAccount]:
         result = await self.db.execute(select(KiroAccount).where(KiroAccount.account_id == account_id))
@@ -525,6 +566,11 @@ class KiroService:
         if is_shared not in (0, 1):
             raise UpstreamAPIError(status_code=400, message="is_shared must be 0 or 1")
 
+        expires_in_raw = account_data.get("expires_in") if "expires_in" in account_data else account_data.get("expiresIn")
+        expires_in: Optional[int] = None
+        if isinstance(expires_in_raw, (int, float)) and int(expires_in_raw) > 0:
+            expires_in = int(expires_in_raw)
+
         credentials_payload = {
             "type": "kiro",
             "refresh_token": refresh_token,
@@ -540,6 +586,8 @@ class KiroService:
             "subscription": subscription,
             "subscription_type": subscription_type,
         }
+        if expires_in is not None:
+            credentials_payload["expires_in"] = expires_in
         encrypted_credentials = encrypt_api_key(json.dumps(credentials_payload, ensure_ascii=False))
 
         account = KiroAccount(
@@ -558,6 +606,8 @@ class KiroService:
             need_refresh=False,
             credentials=encrypted_credentials,
         )
+        if expires_in is not None and (account_data.get("access_token") or account_data.get("accessToken")):
+            account.token_expires_at = _now_utc() + timedelta(seconds=expires_in)
 
         self.db.add(account)
         await self.db.flush()
@@ -833,39 +883,1092 @@ class KiroService:
 
         return {"success": True, "message": "配置已更新", "data": {"subscription": sub, "configured": True, "model_ids": normalized}}
 
-    # ==================== Kiro OpenAI兼容API ====================
-    
-    async def get_models(self, user_id: int) -> Dict[str, Any]:
-        """获取Kiro模型列表（通过插件API）"""
-        return await self._proxy_request(
-            user_id=user_id,
-            method="GET",
-            path="/v1/kiro/models"
-        )
-    
-    async def chat_completions(
-        self,
-        user_id: int,
-        request_data: Dict[str, Any]
+    # ==================== Kiro OpenAI兼容API（后端直连上游） ====================
+
+    def _get_kiro_proxy_url(self) -> Optional[str]:
+        value = getattr(self.settings, "kiro_proxy_url", None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return None
+
+    def _get_kiro_ide_version(self) -> str:
+        value = getattr(self.settings, "kiro_ide_version", None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return "0.9.2"
+
+    @staticmethod
+    def _coerce_region(value: Any) -> str:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return "us-east-1"
+
+    @staticmethod
+    def _extract_openai_text_content(content: Any) -> str:
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: List[str] = []
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                item_type = str(item.get("type") or "").strip().lower()
+                if item_type in ("text", "input_text"):
+                    text = item.get("text")
+                    if isinstance(text, str) and text:
+                        parts.append(text)
+            return "".join(parts)
+        return str(content)
+
+    @staticmethod
+    def _extract_openai_tool_uses(message: Dict[str, Any]) -> List[Dict[str, Any]]:
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            return []
+
+        out: List[Dict[str, Any]] = []
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                continue
+            tc_id = str(tc.get("id") or "").strip()
+            if not tc_id:
+                tc_id = f"call_{uuid4().hex[:24]}"
+
+            func = tc.get("function")
+            if not isinstance(func, dict):
+                continue
+            name = str(func.get("name") or "").strip()
+            if not name:
+                continue
+
+            args_raw = func.get("arguments")
+            args_obj: Any = {}
+            if isinstance(args_raw, str) and args_raw.strip():
+                try:
+                    args_obj = json.loads(args_raw)
+                except Exception:
+                    args_obj = {}
+            elif isinstance(args_raw, dict):
+                args_obj = args_raw
+
+            out.append(
+                {
+                    "toolUseId": tc_id,
+                    "name": name,
+                    "input": args_obj if isinstance(args_obj, dict) else {},
+                }
+            )
+        return out
+
+    @classmethod
+    def _convert_openai_tools_to_kiro_tools(cls, tools: Any) -> List[Dict[str, Any]]:
+        if not isinstance(tools, list):
+            return []
+
+        out: List[Dict[str, Any]] = []
+        for item in tools:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("type") or "").strip().lower() != "function":
+                continue
+            fn = item.get("function")
+            if not isinstance(fn, dict):
+                continue
+
+            name = str(fn.get("name") or "").strip()
+            if not name:
+                continue
+            desc = fn.get("description")
+            desc_str = desc.strip() if isinstance(desc, str) else ""
+            if not desc_str:
+                desc_str = f"Tool: {name}"
+
+            parameters = fn.get("parameters")
+            schema_obj = parameters if isinstance(parameters, dict) else {}
+            if schema_obj.get("type") is None:
+                schema_obj = dict(schema_obj)
+                schema_obj["type"] = "object"
+            if not isinstance(schema_obj.get("properties"), dict):
+                schema_obj = dict(schema_obj)
+                schema_obj["properties"] = {}
+
+            out.append(
+                {
+                    "toolSpecification": {
+                        "name": name,
+                        "description": desc_str[:10000],
+                        "inputSchema": {"json": schema_obj},
+                    }
+                }
+            )
+        return out
+
+    def _build_conversation_state_from_openai(
+        self, *, request_data: Dict[str, Any], tools: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        """Kiro聊天补全（非流式，通过插件API）"""
-        return await self._proxy_request(
-            user_id=user_id,
-            method="POST",
-            path="/v1/kiro/chat/completions",
-            json_data=request_data
+        model_raw = str(request_data.get("model") or "").strip()
+        model_id = KiroAnthropicConverter._map_model(model_raw)
+
+        messages = request_data.get("messages")
+        if not isinstance(messages, list) or not messages:
+            raise ValueError("messages must be a non-empty list")
+
+        system_parts: List[str] = []
+        non_system: List[Dict[str, Any]] = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            role = str(msg.get("role") or "").strip().lower()
+            if role in ("system", "developer"):
+                system_parts.append(self._extract_openai_text_content(msg.get("content")))
+                continue
+            non_system.append(msg)
+
+        if not non_system:
+            raise ValueError("no non-system messages to send")
+
+        # conversationId：允许客户端通过 user 字段传入 session_... 来固定会话（对齐 KiroAnthropicConverter）
+        user_hint = request_data.get("user")
+        conversation_id = None
+        if isinstance(user_hint, str) and user_hint.strip():
+            conversation_id = KiroAnthropicConverter._extract_session_id(user_hint.strip())
+            if conversation_id is None:
+                # 如果 user 直接是 UUID，也允许
+                try:
+                    import uuid
+
+                    uuid.UUID(user_hint.strip())
+                    conversation_id = user_hint.strip()
+                except Exception:
+                    conversation_id = None
+        if conversation_id is None:
+            conversation_id = str(uuid4())
+
+        history: List[Dict[str, Any]] = []
+
+        system_text = "\n".join([p for p in system_parts if p]).strip()
+        if system_text:
+            history.append(
+                {
+                    "userInputMessage": {
+                        "userInputMessageContext": {},
+                        "content": system_text,
+                        "modelId": model_id,
+                        "images": [],
+                        "origin": "AI_EDITOR",
+                    }
+                }
+            )
+            history.append({"assistantResponseMessage": {"content": "I will follow these instructions."}})
+
+        # history: all but last
+        for msg in non_system[:-1]:
+            role = str(msg.get("role") or "").strip().lower()
+            if role == "assistant":
+                tool_uses = self._extract_openai_tool_uses(msg)
+                text = self._extract_openai_text_content(msg.get("content"))
+                if not text and tool_uses:
+                    text = "There is a tool use."
+                assistant: Dict[str, Any] = {"content": text}
+                if tool_uses:
+                    assistant["toolUses"] = tool_uses
+                history.append({"assistantResponseMessage": assistant})
+                continue
+
+            if role in ("tool", "function"):
+                tool_call_id = str(msg.get("tool_call_id") or msg.get("toolCallId") or "").strip()
+                tool_text = self._extract_openai_text_content(msg.get("content"))
+                ctx: Dict[str, Any] = {}
+                if tool_call_id:
+                    ctx["toolResults"] = [
+                        {
+                            "toolUseId": tool_call_id,
+                            "content": [{"text": tool_text}],
+                            "status": "success",
+                        }
+                    ]
+                history.append(
+                    {
+                        "userInputMessage": {
+                            "userInputMessageContext": ctx,
+                            "content": "",
+                            "modelId": model_id,
+                            "images": [],
+                            "origin": "AI_EDITOR",
+                        }
+                    }
+                )
+                continue
+
+            # default: treat as user
+            text = self._extract_openai_text_content(msg.get("content"))
+            history.append(
+                {
+                    "userInputMessage": {
+                        "userInputMessageContext": {},
+                        "content": text,
+                        "modelId": model_id,
+                        "images": [],
+                        "origin": "AI_EDITOR",
+                    }
+                }
+            )
+
+        # current message
+        last = non_system[-1]
+        last_role = str(last.get("role") or "").strip().lower()
+        current_tool_results: List[Dict[str, Any]] = []
+        current_text = ""
+
+        if last_role == "assistant":
+            tool_uses = self._extract_openai_tool_uses(last)
+            text = self._extract_openai_text_content(last.get("content"))
+            if not text and tool_uses:
+                text = "There is a tool use."
+            assistant: Dict[str, Any] = {"content": text}
+            if tool_uses:
+                assistant["toolUses"] = tool_uses
+            history.append({"assistantResponseMessage": assistant})
+            current_text = "Continue"
+        elif last_role in ("tool", "function"):
+            tool_call_id = str(last.get("tool_call_id") or last.get("toolCallId") or "").strip()
+            tool_text = self._extract_openai_text_content(last.get("content"))
+            if tool_call_id:
+                current_tool_results.append(
+                    {
+                        "toolUseId": tool_call_id,
+                        "content": [{"text": tool_text}],
+                        "status": "success",
+                    }
+                )
+            current_text = ""
+        else:
+            current_text = self._extract_openai_text_content(last.get("content"))
+
+        # sanitize tool pairing in history to avoid upstream 400
+        try:
+            KiroAnthropicConverter._sanitize_history_tool_pairing(history)
+        except Exception:
+            pass
+
+        # ensure history tool names exist in current tools
+        try:
+            history_tool_names = KiroAnthropicConverter._collect_history_tool_names(history)
+            KiroAnthropicConverter._ensure_tool_definitions(tools, history_tool_names)
+        except Exception:
+            pass
+
+        user_ctx: Dict[str, Any] = {}
+        if tools:
+            user_ctx["tools"] = tools
+        if current_tool_results:
+            user_ctx["toolResults"] = current_tool_results
+
+        if not current_text and not current_tool_results:
+            current_text = "OK"
+
+        conversation_state = {
+            "agentContinuationId": str(uuid4()),
+            "agentTaskType": "vibe",
+            "chatTriggerType": "MANUAL",
+            "conversationId": conversation_id,
+            "currentMessage": {
+                "userInputMessage": {
+                    "userInputMessageContext": user_ctx,
+                    "content": current_text,
+                    "modelId": model_id,
+                    "images": [],
+                    "origin": "AI_EDITOR",
+                }
+            },
+            "history": history,
+        }
+
+        return conversation_state
+
+    async def _list_available_chat_accounts(self, *, user_id: int, exclude: set[str]) -> List[KiroAccount]:
+        stmt = select(KiroAccount).where(KiroAccount.status == 1)
+        stmt = stmt.where(
+            (KiroAccount.user_id == user_id)
+            | ((KiroAccount.user_id.is_(None)) & (KiroAccount.is_shared == 1))
         )
-    
-    async def chat_completions_stream(
+        if exclude:
+            stmt = stmt.where(KiroAccount.account_id.not_in(exclude))
+        result = await self.db.execute(stmt.order_by(KiroAccount.created_at.desc()))
+        return list(result.scalars().all())
+
+    async def _ensure_valid_access_token(
+        self, *, client: httpx.AsyncClient, account: KiroAccount
+    ) -> Tuple[str, Optional[str]]:
+        creds = self._load_account_credentials(account)
+
+        access_token = _trimmed_str(creds.get("access_token") or creds.get("accessToken"))
+        profile_arn = _trimmed_str(creds.get("profile_arn") or creds.get("profileArn")) or None
+
+        now = _now_utc()
+        expired = account.token_expires_at is None or account.token_expires_at <= (now + timedelta(seconds=30))
+        if account.need_refresh or not access_token or expired:
+            auth_method = _trimmed_str(account.auth_method or creds.get("auth_method") or creds.get("authMethod") or "Social")
+            region = self._coerce_region(account.region or creds.get("region"))
+            refresh_token = _trimmed_str(creds.get("refresh_token") or creds.get("refreshToken"))
+            if not refresh_token:
+                raise ValueError("Kiro account missing refresh_token")
+
+            machineid = _trimmed_str(account.machineid or creds.get("machineid"))
+            if not machineid:
+                machineid = secrets.token_hex(32)
+                account.machineid = machineid
+
+            new_token: Optional[str] = None
+            new_refresh: Optional[str] = None
+            expires_in: Optional[int] = None
+            new_profile_arn: Optional[str] = None
+
+            if auth_method.lower() == "idc":
+                client_id = _trimmed_str(creds.get("client_id") or creds.get("clientId"))
+                client_secret = _trimmed_str(creds.get("client_secret") or creds.get("clientSecret"))
+                if not client_id or not client_secret:
+                    raise ValueError("IdC account requires client_id and client_secret")
+
+                url = f"https://oidc.{region}.amazonaws.com/token"
+                headers = {
+                    "Content-Type": "application/json",
+                    "Host": f"oidc.{region}.amazonaws.com",
+                    "Connection": "keep-alive",
+                    "x-amz-user-agent": (
+                        "aws-sdk-js/3.738.0 ua/2.1 os/other lang/js md/browser#unknown_unknown "
+                        "api/sso-oidc#3.738.0 m/E KiroIDE"
+                    ),
+                    "Accept": "*/*",
+                    "Accept-Language": "*",
+                    "sec-fetch-mode": "cors",
+                    "User-Agent": "node",
+                    "Accept-Encoding": "br, gzip, deflate",
+                }
+                payload = {
+                    "clientId": client_id,
+                    "clientSecret": client_secret,
+                    "refreshToken": refresh_token,
+                    "grantType": "refresh_token",
+                }
+                resp = await client.post(url, json=payload, headers=headers, timeout=120.0)
+                if resp.status_code >= 400:
+                    body = resp.text[:2000]
+                    account.need_refresh = True
+                    raise ValueError(f"IdC token refresh failed: HTTP {resp.status_code} {body}")
+                data = resp.json()
+                if isinstance(data, dict):
+                    new_token = _trimmed_str(data.get("accessToken") or data.get("access_token"))
+                    new_refresh = _trimmed_str(data.get("refreshToken") or data.get("refresh_token")) or None
+                    expires_in = data.get("expiresIn") if isinstance(data.get("expiresIn"), int) else None
+            else:
+                url = f"https://prod.{region}.auth.desktop.kiro.dev/refreshToken"
+                host = f"prod.{region}.auth.desktop.kiro.dev"
+                ide_version = self._get_kiro_ide_version()
+                headers = {
+                    "Accept": "application/json, text/plain, */*",
+                    "Content-Type": "application/json",
+                    "User-Agent": f"KiroIDE-{ide_version}-{machineid}",
+                    "Accept-Encoding": "gzip, compress, deflate, br",
+                    "host": host,
+                    "Connection": "close",
+                }
+                payload = {"refreshToken": refresh_token}
+                resp = await client.post(url, json=payload, headers=headers, timeout=120.0)
+                if resp.status_code >= 400:
+                    body = resp.text[:2000]
+                    account.need_refresh = True
+                    raise ValueError(f"Social token refresh failed: HTTP {resp.status_code} {body}")
+                data = resp.json()
+                if isinstance(data, dict):
+                    new_token = _trimmed_str(data.get("accessToken") or data.get("access_token"))
+                    new_refresh = _trimmed_str(data.get("refreshToken") or data.get("refresh_token")) or None
+                    new_profile_arn = _trimmed_str(data.get("profileArn") or data.get("profile_arn")) or None
+                    expires_in = data.get("expiresIn") if isinstance(data.get("expiresIn"), int) else None
+
+            if not new_token:
+                account.need_refresh = True
+                raise ValueError("token refresh returned empty accessToken")
+
+            access_token = new_token
+            if new_refresh:
+                creds["refresh_token"] = new_refresh
+            creds["access_token"] = access_token
+            if new_profile_arn:
+                creds["profile_arn"] = new_profile_arn
+                profile_arn = new_profile_arn
+
+            if expires_in and expires_in > 0:
+                account.token_expires_at = now + timedelta(seconds=int(expires_in))
+            else:
+                account.token_expires_at = now + timedelta(hours=1)
+
+            account.need_refresh = False
+            account.region = region
+            account.credentials = encrypt_api_key(json.dumps(creds, ensure_ascii=False))
+            await self.db.flush()
+
+        return access_token, profile_arn
+
+    def _kiro_api_base_urls(self, region: str) -> List[str]:
+        # Prefer q.* (kiro.rs), fallback to codewhisperer.* (KiroGate)
+        return [
+            f"https://q.{region}.amazonaws.com",
+            f"https://codewhisperer.{region}.amazonaws.com",
+        ]
+
+    def _build_kiro_headers(self, *, token: str, machineid: str) -> Dict[str, str]:
+        ide_version = self._get_kiro_ide_version()
+        mid = (machineid or "")[:32] or secrets.token_hex(16)
+        user_agent = (
+            "aws-sdk-js/1.0.27 ua/2.1 os/win32#10.0.19044 lang/js md/nodejs#22.21.1 "
+            f"api/codewhispererstreaming#1.0.27 m/E KiroIDE-{ide_version}-{mid}"
+        )
+        amz_user_agent = f"aws-sdk-js/1.0.27 KiroIDE-{ide_version}-{mid}"
+
+        return {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": user_agent,
+            "x-amz-user-agent": amz_user_agent,
+            "x-amzn-codewhisperer-optout": "true",
+            "x-amzn-kiro-agent-mode": "vibe",
+            "amz-sdk-invocation-id": str(uuid4()),
+            "amz-sdk-request": "attempt=1; max=3",
+            "Connection": "close",
+        }
+
+    async def _stream_generate_assistant_response_as_openai(
         self,
-        user_id: int,
-        request_data: Dict[str, Any]
-    ):
-        """Kiro聊天补全（流式，通过插件API）"""
-        async for chunk in self._proxy_stream_request(
-            user_id=user_id,
-            method="POST",
-            path="/v1/kiro/chat/completions",
-            json_data=request_data
-        ):
-            yield chunk
+        *,
+        client: httpx.AsyncClient,
+        base_url: str,
+        headers: Dict[str, str],
+        payload: Dict[str, Any],
+        model: str,
+    ) -> AsyncIterator[bytes]:
+        from app.utils.token_counter import count_tokens as _count_tokens
+
+        def _safe_json_dumps(obj: Any) -> str:
+            try:
+                return json.dumps(obj, ensure_ascii=False)
+            except Exception:
+                try:
+                    return str(obj)
+                except Exception:
+                    return ""
+
+        def _estimate_tool_context_tokens(ctx: Any) -> int:
+            if not isinstance(ctx, dict):
+                return 0
+
+            total = 0
+
+            tool_results = ctx.get("toolResults")
+            if isinstance(tool_results, list):
+                for tr in tool_results:
+                    if not isinstance(tr, dict):
+                        continue
+                    content = tr.get("content")
+                    if isinstance(content, str) and content:
+                        total += _count_tokens(content)
+                    elif isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict):
+                                text = block.get("text")
+                                if isinstance(text, str) and text:
+                                    total += _count_tokens(text)
+                            elif isinstance(block, str) and block:
+                                total += _count_tokens(block)
+
+            tools = ctx.get("tools")
+            if isinstance(tools, list):
+                for tool in tools:
+                    if not isinstance(tool, dict):
+                        continue
+                    spec = tool.get("toolSpecification")
+                    if not isinstance(spec, dict):
+                        continue
+                    name = spec.get("name")
+                    desc = spec.get("description")
+                    if isinstance(name, str) and name:
+                        total += _count_tokens(name)
+                    if isinstance(desc, str) and desc:
+                        total += _count_tokens(desc)
+                    schema = None
+                    input_schema = spec.get("inputSchema")
+                    if isinstance(input_schema, dict):
+                        schema = input_schema.get("json")
+                    schema_str = _safe_json_dumps(schema) if schema is not None else ""
+                    if schema_str:
+                        total += _count_tokens(schema_str)
+
+            return total
+
+        def _estimate_prompt_tokens_from_conversation_state(state: Any) -> int:
+            if not isinstance(state, dict):
+                return 0
+
+            total = 0
+
+            history = state.get("history")
+            if isinstance(history, list):
+                for msg in history:
+                    if not isinstance(msg, dict):
+                        continue
+
+                    uim = msg.get("userInputMessage")
+                    if isinstance(uim, dict):
+                        content = uim.get("content")
+                        if isinstance(content, str) and content:
+                            total += _count_tokens(content)
+                        total += _estimate_tool_context_tokens(uim.get("userInputMessageContext"))
+                        continue
+
+                    arm = msg.get("assistantResponseMessage")
+                    if isinstance(arm, dict):
+                        content = arm.get("content")
+                        if isinstance(content, str) and content:
+                            total += _count_tokens(content)
+                        tool_uses = arm.get("toolUses")
+                        if isinstance(tool_uses, list):
+                            for tu in tool_uses:
+                                if not isinstance(tu, dict):
+                                    continue
+                                name = tu.get("name")
+                                if isinstance(name, str) and name:
+                                    total += _count_tokens(name)
+                                input_obj = tu.get("input")
+                                input_str = _safe_json_dumps(input_obj) if input_obj is not None else ""
+                                if input_str:
+                                    total += _count_tokens(input_str)
+
+            current = state.get("currentMessage")
+            if isinstance(current, dict):
+                uim = current.get("userInputMessage")
+                if isinstance(uim, dict):
+                    content = uim.get("content")
+                    if isinstance(content, str) and content:
+                        total += _count_tokens(content)
+                    total += _estimate_tool_context_tokens(uim.get("userInputMessageContext"))
+
+            return max(0, int(total))
+
+        def _estimate_openai_tool_calls_tokens(tool_calls: Any) -> int:
+            if not isinstance(tool_calls, list):
+                return 0
+            total = 0
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                func = tc.get("function")
+                if not isinstance(func, dict):
+                    continue
+                name = func.get("name")
+                args = func.get("arguments")
+                if isinstance(name, str) and name:
+                    total += _count_tokens(name)
+                if isinstance(args, str) and args:
+                    total += _count_tokens(args)
+            return max(0, int(total))
+
+        completion_id = f"chatcmpl-{uuid4().hex[:24]}"
+        created_time = int(time.time())
+        first_chunk = True
+
+        conversation_state = payload.get("conversationState") if isinstance(payload.get("conversationState"), dict) else {}
+        prompt_tokens_estimate = _estimate_prompt_tokens_from_conversation_state(conversation_state)
+
+        url = f"{base_url.rstrip('/')}/generateAssistantResponse"
+        host = httpx.URL(url).host
+        if host:
+            headers = dict(headers)
+            headers["Host"] = host
+
+        async with client.stream("POST", url, headers=headers, json=payload, timeout=httpx.Timeout(1200.0, connect=60.0)) as resp:
+            if resp.status_code >= 400:
+                raw = await resp.aread()
+                msg = raw.decode("utf-8", errors="replace")[:2000]
+                yield _openai_sse_error(msg or "Kiro upstream error", code=resp.status_code)
+                yield _openai_sse_done()
+                return
+
+            parser = _KiroAwsEventStreamParser()
+            content_parts: List[str] = []
+            context_usage_percentage: Optional[float] = None
+
+            async for chunk in resp.aiter_raw():
+                if not chunk:
+                    continue
+                events = parser.feed(chunk)
+                for ev in events:
+                    ev_type = ev.get("type")
+                    if ev_type == "context_usage":
+                        value = ev.get("data")
+                        try:
+                            context_usage_percentage = float(value)  # type: ignore[arg-type]
+                        except Exception:
+                            context_usage_percentage = context_usage_percentage
+                        continue
+
+                    if ev_type != "content":
+                        continue
+                    text = ev.get("data")
+                    if not isinstance(text, str) or not text:
+                        continue
+                    content_parts.append(text)
+                    delta: Dict[str, Any] = {"content": text}
+                    if first_chunk:
+                        delta["role"] = "assistant"
+                        first_chunk = False
+                    openai_chunk = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created_time,
+                        "model": model,
+                        "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+                    }
+                    yield _openai_sse_data(openai_chunk)
+
+            tool_calls = parser.get_tool_calls()
+            finish_reason = "tool_calls" if tool_calls else "stop"
+
+            if tool_calls:
+                indexed_tool_calls = []
+                for idx, tc in enumerate(tool_calls):
+                    if not isinstance(tc, dict):
+                        continue
+                    tc2 = dict(tc)
+                    tc2["index"] = idx
+                    indexed_tool_calls.append(tc2)
+
+                tool_calls_chunk = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_time,
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {"tool_calls": indexed_tool_calls}, "finish_reason": None}],
+                }
+                yield _openai_sse_data(tool_calls_chunk)
+
+            full_content = "".join(content_parts)
+            completion_tokens = int(_count_tokens(full_content)) + _estimate_openai_tool_calls_tokens(tool_calls)
+
+            prompt_tokens = int(prompt_tokens_estimate)
+            if context_usage_percentage is not None:
+                try:
+                    pct = float(context_usage_percentage)
+                    # Align kiro.rs: contextUsagePercentage indicates prompt context usage percentage.
+                    if pct > 0:
+                        prompt_tokens = int(pct * 200000 / 100.0)
+                except Exception:
+                    prompt_tokens = prompt_tokens
+
+            total_tokens = max(0, int(prompt_tokens + completion_tokens))
+
+            final_chunk = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created_time,
+                "model": model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+                "usage": {"prompt_tokens": int(prompt_tokens), "completion_tokens": int(completion_tokens), "total_tokens": int(total_tokens)},
+            }
+            if context_usage_percentage is not None:
+                final_chunk["contextUsage"] = {"context_usage_percentage": context_usage_percentage}
+            yield _openai_sse_data(final_chunk)
+            yield _openai_sse_done()
+
+    async def _get_allowed_model_ids_for_user(self, user_id: int) -> List[str]:
+        # 默认放行：如果管理员没有配置订阅白名单，则返回全量支持列表
+        allowed: set[str] = set()
+
+        result = await self.db.execute(
+            select(KiroAccount.subscription)
+            .where(
+                (KiroAccount.user_id == user_id)
+                | ((KiroAccount.user_id.is_(None)) & (KiroAccount.is_shared == 1))
+            )
+            .where(KiroAccount.status == 1)
+        )
+        subs = {str(s).strip() for s in result.scalars().all() if isinstance(s, str) and s.strip()}
+
+        for sub in subs:
+            record = await self.db.get(KiroSubscriptionModel, sub)
+            if record is None:
+                continue
+            parsed = _safe_json_load(record.allowed_model_ids)
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, str) and item.strip():
+                        allowed.add(item.strip())
+
+        if allowed:
+            return [m for m in self.SUPPORTED_MODELS if m in allowed]
+
+        return list(self.SUPPORTED_MODELS)
+
+    async def get_models(self, user_id: int) -> Dict[str, Any]:
+        """获取 Kiro 模型列表（后端本地生成；不依赖 plug-in）。"""
+        model_ids = await self._get_allowed_model_ids_for_user(user_id)
+        now_ts = int(time.time())
+        return {
+            "object": "list",
+            "data": [{"id": mid, "object": "model", "created": now_ts, "owned_by": "kiro"} for mid in model_ids],
+        }
+
+    async def chat_completions(self, user_id: int, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Kiro 聊天补全（非流式）。内部走 stream 收集，保证行为一致。"""
+        from app.services.anthropic_adapter import AnthropicAdapter
+
+        openai_stream = self.chat_completions_stream(user_id=user_id, request_data=request_data)
+        return await AnthropicAdapter.collect_openai_stream_to_response(openai_stream)
+
+    async def chat_completions_stream(self, user_id: int, request_data: Dict[str, Any]) -> AsyncIterator[bytes]:
+        """
+        Kiro 聊天补全（OpenAI SSE）。
+
+        - 不再代理 plug-in `/v1/kiro/chat/completions`
+        - 直接使用 Backend DB 中的 Kiro accounts（refresh_token / client_id / client_secret）
+        - 上游返回 AWS event stream（二进制），这里解析后转成 OpenAI `data: {...}\\n\\n`
+        """
+        if not isinstance(request_data, dict):
+            yield _openai_sse_error("request_data must be a JSON object", code=400)
+            yield _openai_sse_done()
+            return
+
+        requested_model = str(request_data.get("model") or "").strip() or "claude-sonnet-4-5"
+
+        exclude: set[str] = set()
+        attempts = 0
+
+        proxy_url = self._get_kiro_proxy_url()
+        client_kwargs: Dict[str, Any] = {
+            "timeout": httpx.Timeout(1200.0, connect=60.0),
+        }
+        if proxy_url:
+            client_kwargs["proxies"] = proxy_url
+
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            while attempts < 3:
+                attempts += 1
+                accounts = await self._list_available_chat_accounts(user_id=user_id, exclude=exclude)
+                if not accounts:
+                    yield _openai_sse_error("没有可用的 Kiro 账号，请先导入账号", code=400)
+                    yield _openai_sse_done()
+                    return
+
+                account = secrets.choice(list(accounts))
+                exclude.add(account.account_id)
+
+                try:
+                    access_token, profile_arn = await self._ensure_valid_access_token(client=client, account=account)
+                except Exception as e:
+                    yield _openai_sse_error(str(e), code=400)
+                    yield _openai_sse_done()
+                    return
+
+                creds = self._load_account_credentials(account)
+                region = self._coerce_region(account.region or creds.get("region"))
+                machineid = _trimmed_str(account.machineid or creds.get("machineid")) or secrets.token_hex(32)
+                account.machineid = machineid
+                account.last_used_at = _now_utc()
+
+                # Build Kiro payload
+                try:
+                    if "conversationState" in request_data and isinstance(request_data.get("conversationState"), dict):
+                        conversation_state = request_data["conversationState"]
+                        payload: Dict[str, Any] = {"conversationState": conversation_state}
+                    else:
+                        kiro_tools = self._convert_openai_tools_to_kiro_tools(request_data.get("tools"))
+                        conversation_state = self._build_conversation_state_from_openai(
+                            request_data=request_data,
+                            tools=kiro_tools,
+                        )
+                        payload = {"conversationState": conversation_state}
+
+                    if profile_arn:
+                        payload["profileArn"] = profile_arn
+                except Exception as e:
+                    yield _openai_sse_error(f"构建 Kiro 请求失败: {e}", code=400)
+                    yield _openai_sse_done()
+                    return
+
+                headers = self._build_kiro_headers(token=access_token, machineid=machineid)
+
+                base_urls = self._kiro_api_base_urls(region)
+                last_connect_error: Optional[str] = None
+                for base_url in base_urls:
+                    try:
+                        async for chunk in self._stream_generate_assistant_response_as_openai(
+                            client=client,
+                            base_url=base_url,
+                            headers=headers,
+                            payload=payload,
+                            model=requested_model,
+                        ):
+                            yield chunk
+                        await self.db.flush()
+                        return
+                    except httpx.ConnectError as e:
+                        last_connect_error = str(e)
+                        continue
+                    except httpx.HTTPError as e:
+                        last_connect_error = str(e)
+                        continue
+
+                yield _openai_sse_error(last_connect_error or "Kiro upstream connect error", code=500)
+                yield _openai_sse_done()
+                return
+
+
+class _KiroAwsEventStreamParser:
+    """
+    Best-effort parser for AWS event stream response body used by Kiro/Amazon Q Developer.
+
+    Notes:
+    - Upstream payload is a binary event stream; we decode as UTF-8 (ignore errors) and
+      extract embedded JSON fragments by pattern matching.
+    - This follows the same pragmatic approach used by community gateways (kiro.rs / KiroGate).
+    """
+
+    _PATTERN_TYPE_MAP = {
+        '{"content":': "content",
+        '{"name":': "tool_start",
+        '{"input":': "tool_input",
+        '{"stop":': "tool_stop",
+        '{"followupPrompt":': "followup",
+        '{"usage":': "usage",
+        '{"contextUsagePercentage":': "context_usage",
+    }
+
+    _PATTERN_REGEX = re.compile(
+        r'\{"(?:content|name|input|stop|followupPrompt|usage|contextUsagePercentage)":'
+    )
+
+    def __init__(self) -> None:
+        self.buffer = ""
+        self.last_content: Optional[str] = None
+        self.current_tool_call: Optional[Dict[str, Any]] = None
+        self.tool_calls: List[Dict[str, Any]] = []
+
+    @staticmethod
+    def _find_matching_brace(text: str, start_pos: int) -> int:
+        if start_pos >= len(text) or text[start_pos] != "{":
+            return -1
+
+        brace_count = 0
+        in_string = False
+        escape_next = False
+
+        for i in range(start_pos, len(text)):
+            ch = text[i]
+
+            if escape_next:
+                escape_next = False
+                continue
+
+            if ch == "\\" and in_string:
+                escape_next = True
+                continue
+
+            if ch == '"' and not escape_next:
+                in_string = not in_string
+                continue
+
+            if not in_string:
+                if ch == "{":
+                    brace_count += 1
+                elif ch == "}":
+                    brace_count -= 1
+                    if brace_count == 0:
+                        return i
+
+        return -1
+
+    def feed(self, chunk: bytes) -> List[Dict[str, Any]]:
+        try:
+            self.buffer += chunk.decode("utf-8", errors="ignore")
+        except Exception:
+            return []
+
+        events: List[Dict[str, Any]] = []
+
+        while True:
+            match = self._PATTERN_REGEX.search(self.buffer)
+            if not match:
+                break
+
+            start = match.start()
+            colon_pos = self.buffer.find(":", start)
+            if colon_pos == -1:
+                break
+
+            prefix = self.buffer[start : colon_pos + 1]
+            event_type = self._PATTERN_TYPE_MAP.get(prefix)
+            if event_type is None:
+                self.buffer = self.buffer[start + 1 :]
+                continue
+
+            json_end = self._find_matching_brace(self.buffer, start)
+            if json_end == -1:
+                break
+
+            json_str = self.buffer[start : json_end + 1]
+            self.buffer = self.buffer[json_end + 1 :]
+
+            try:
+                data = json.loads(json_str)
+            except Exception:
+                continue
+
+            event = self._process_event(data, event_type)
+            if event:
+                events.append(event)
+
+        # Prevent unbounded growth if upstream sends long binary chunks without a pattern hit.
+        if len(self.buffer) > 200_000:
+            self.buffer = self.buffer[-200_000:]
+
+        return events
+
+    def _process_event(self, data: Any, event_type: str) -> Optional[Dict[str, Any]]:
+        if not isinstance(data, dict):
+            return None
+
+        if event_type == "content":
+            content = data.get("content")
+            if not isinstance(content, str) or not content:
+                return None
+            if data.get("followupPrompt"):
+                return None
+            if content == self.last_content:
+                return None
+            self.last_content = content
+            return {"type": "content", "data": content}
+
+        if event_type == "usage":
+            return {"type": "usage", "data": data.get("usage")}
+
+        if event_type == "context_usage":
+            return {"type": "context_usage", "data": data.get("contextUsagePercentage")}
+
+        if event_type == "tool_start":
+            return self._process_tool_start(data)
+
+        if event_type == "tool_input":
+            return self._process_tool_input(data)
+
+        if event_type == "tool_stop":
+            return self._process_tool_stop(data)
+
+        return None
+
+    def _process_tool_start(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if self.current_tool_call:
+            self._finalize_tool_call()
+
+        name = data.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return None
+
+        tool_use_id = data.get("toolUseId")
+        tool_id = tool_use_id.strip() if isinstance(tool_use_id, str) and tool_use_id.strip() else f"call_{uuid4().hex[:24]}"
+
+        input_data = data.get("input", "")
+        if isinstance(input_data, dict):
+            input_str = json.dumps(input_data, ensure_ascii=False)
+        else:
+            input_str = str(input_data) if input_data else ""
+
+        self.current_tool_call = {
+            "id": tool_id,
+            "type": "function",
+            "function": {"name": name.strip(), "arguments": input_str},
+        }
+
+        if data.get("stop"):
+            self._finalize_tool_call()
+
+        return None
+
+    def _process_tool_input(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not self.current_tool_call:
+            return None
+
+        input_data = data.get("input", "")
+        if isinstance(input_data, dict):
+            input_str = json.dumps(input_data, ensure_ascii=False)
+        else:
+            input_str = str(input_data) if input_data else ""
+
+        try:
+            self.current_tool_call["function"]["arguments"] += input_str
+        except Exception:
+            pass
+        return None
+
+    def _process_tool_stop(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if self.current_tool_call and data.get("stop"):
+            self._finalize_tool_call()
+        return None
+
+    def _finalize_tool_call(self) -> None:
+        if not self.current_tool_call:
+            return
+
+        func = self.current_tool_call.get("function") or {}
+        raw_args = func.get("arguments")
+        args_text = raw_args if isinstance(raw_args, str) else ""
+
+        normalized = "{}"
+        if isinstance(args_text, str) and args_text.strip():
+            try:
+                parsed = json.loads(args_text)
+                if isinstance(parsed, (dict, list)):
+                    normalized = json.dumps(parsed, ensure_ascii=False)
+            except Exception:
+                normalized = "{}"
+
+        self.current_tool_call["function"]["arguments"] = normalized
+        self.tool_calls.append(self.current_tool_call)
+        self.current_tool_call = None
+
+    def get_tool_calls(self) -> List[Dict[str, Any]]:
+        if self.current_tool_call:
+            self._finalize_tool_call()
+
+        # Deduplicate by id (keep the one with longer args), then by (name,args)
+        by_id: Dict[str, Dict[str, Any]] = {}
+        without_id: List[Dict[str, Any]] = []
+        for tc in self.tool_calls:
+            tc_id = str(tc.get("id") or "").strip()
+            if not tc_id:
+                without_id.append(tc)
+                continue
+            existing = by_id.get(tc_id)
+            if existing is None:
+                by_id[tc_id] = tc
+                continue
+            existing_args = str((existing.get("function") or {}).get("arguments") or "")
+            current_args = str((tc.get("function") or {}).get("arguments") or "")
+            if len(current_args) > len(existing_args):
+                by_id[tc_id] = tc
+
+        candidates = list(by_id.values()) + without_id
+
+        seen: set[str] = set()
+        unique: List[Dict[str, Any]] = []
+        for tc in candidates:
+            func = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+            name = str(func.get("name") or "")
+            args = str(func.get("arguments") or "")
+            key = f"{name}|{args}"
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(tc)
+
+        return unique

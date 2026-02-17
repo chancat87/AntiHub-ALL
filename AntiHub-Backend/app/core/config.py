@@ -54,6 +54,19 @@ class Settings(BaseSettings):
         description="用于加密存储用户API密钥的密钥"
     )
 
+    # Kiro 配置（可选）
+    kiro_ide_version: str = Field(
+        default="0.9.2",
+        description="Kiro 请求 User-Agent 使用的 IDE 版本（默认 0.9.2）",
+    )
+    kiro_proxy_url: Optional[str] = Field(
+        default=None,
+        description=(
+            "Kiro 上游请求代理（HTTP/SOCKS）。示例：http://127.0.0.1:7890；"
+            "如果后端运行在 Docker 内且代理在宿主机，请使用 http://host.docker.internal:7890"
+        ),
+    )
+
     # Plugin DB → Backend DB 迁移（可选）
     plugin_db_migration_enabled: bool = Field(
         default=False,

@@ -918,6 +918,7 @@ class AnthropicAdapter:
         openai_stream: AsyncGenerator[bytes, None],
         model: str,
         request_id: str,
+        estimated_input_tokens: int = 0,
         thinking_enabled: bool = False
     ) -> AsyncGenerator[str, None]:
         """
@@ -948,7 +949,8 @@ class AnthropicAdapter:
                 "stop_reason": None,
                 "stop_sequence": None,
                 "usage": {
-                    "input_tokens": 0,
+                    # Align kiro.rs / Claude: /v1/messages message_start should carry an estimated input_tokens.
+                    "input_tokens": max(0, int(estimated_input_tokens or 0)),
                     "output_tokens": 0
                 }
             }
@@ -1590,6 +1592,7 @@ class AnthropicAdapter:
         openai_stream: AsyncGenerator[bytes, None],
         model: str,
         request_id: str,
+        estimated_input_tokens: int = 0,
         thinking_enabled: bool = False,
         ping_interval_seconds: float = 25.0,
     ) -> AsyncGenerator[str, None]:
@@ -1611,6 +1614,7 @@ class AnthropicAdapter:
             openai_stream=openai_stream,
             model=model,
             request_id=request_id,
+            estimated_input_tokens=estimated_input_tokens,
             thinking_enabled=thinking_enabled,
         )
 
@@ -1666,6 +1670,9 @@ class AnthropicAdapter:
                 await base_gen.aclose()
             except Exception:
                 pass
+
+        if input_tokens <= 0 and estimated_input_tokens:
+            input_tokens = int(estimated_input_tokens)
 
         message_start = {
             "type": "message_start",
