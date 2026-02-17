@@ -1,11 +1,9 @@
 file,lines,symbol_or_section,usage,replacement_strategy,can_remove,tracking
-.env.example,26;28;29;30;31;32;36;40;75;96;97;98,ENV:PLUGIN_*,"项目级 compose/.env 中对 plugin DB、Redis、OAuth、admin key、encryption key 的配置入口","MPB-060：收敛 compose 后移除 PLUGIN_* 变量；若需兼容可保留但不再要求配置",Phase7,未处理
+.env.example,33;35;37;47;48;49;50;51;57,ENV:PLUGIN_*,"项目级 .env 中对迁移助手（PLUGIN_API_BASE_URL/PLUGIN_ENV_EXPORT_TOKEN/PLUGIN_ADMIN_API_KEY）与加密密钥 PLUGIN_API_ENCRYPTION_KEY 的配置入口；可选提供旧 plugin DB 连接信息（DB_* / PLUGIN_DB_*）","已完成：移除本地 plugin DB init（PLUGIN_DB_INIT_ENABLED 等）；保留迁移助手相关 PLUGIN_*（可选）与 PLUGIN_API_ENCRYPTION_KEY（必配）",Phase7,完成
 docker-compose.yml,48;49;50;98;99;100;101;102;105;106;107;110;111;131;132;133,"compose:backend+antihub-plugin(+db-init)","backend 通过 PLUGIN_API_BASE_URL 指向 antihub-plugin:8045；同时为 plugin 服务与 plugin DB 初始化透传 PLUGIN_DB_* / PLUGIN_REDIS_* / PLUGIN_ADMIN_API_KEY 等","MPB-060：移除 antihub-plugin 服务与相关 env 透传；MPB-030：backend 不再依赖外部 plugin HTTP",Phase7,未处理
 docker-compose.core.yml,46;47;48;92;93;94;95;96;98;99;100;103;104,"compose.core:backend+antihub-plugin","core compose 中同样将 backend 指向 antihub-plugin:8045 并透传 plugin DB/Redis/admin key/OAuth 等","MPB-060：移除 plugin 依赖与 env 透传；MPB-030：backend 本地化实现 /api/plugin-api",Phase7,未处理
 docker-compose.local.yml,11,compose.local:antihub-plugin,"本地 compose 通过 build context 引入 ./AntiHub-plugin","MPB-060：收敛 compose 后移除此文件中的 plugin 构建/依赖",Phase7,未处理
-docker\docker-compose.db-init.yml,17;18;19,compose:db-init,"DB init 侧的 PLUGIN_DB_* 入口（用于初始化 plugin 数据库）","MPB-060：移除 plugin DB init 相关配置；若仅保留 Backend 单库则不再需要",Phase7,未处理
-docker\postgres\init\01-init-plugin-db.sh,15;16;17;19;20;24;25;31;51;52,postgres-init:plugin-db,"postgres init 脚本：创建/配置 plugin DB 与用户；依赖 PLUGIN_DB_*","MPB-060：移除该脚本与调用；若需迁移数据改由 MPB-050 的迁移脚本处理",Phase7,未处理
-docker\postgres\sync-plugin-db.sh,22;23;24;26;27;38;66;67,postgres-sync:plugin-db,"同步/修复 plugin DB 的辅助脚本；依赖 PLUGIN_DB_*","MPB-050：若用作迁移前置则改造为迁移脚本；否则 MPB-060 删除",Phase7,未处理
+docker\docker-compose.db-init.yml,14;15;16;18;19,compose:db-init,"DB init：同步 POSTGRES_USER 密码并确保 POSTGRES_DB 存在/归属正确（Backend 单库）","已完成：移除 plugin DB init，仅保留 Backend DB 同步",Phase7,完成
 AntiHub-Backend\.env.example,29;30;31,ENV:PLUGIN_API_*,"Backend 模块示例环境变量：PLUGIN_API_BASE_URL/ADMIN_KEY/ENCRYPTION_KEY","MPB-030：本地实现后评估是否仍需 plugin_api_key 存储；不需要则移除整组配置与文档",Phase4,未处理
 AntiHub-Backend\docker-compose.yml,34;35;36,compose(backend-only):PLUGIN_API_*,"Backend 模块本地 compose 中通过 localhost:8045 指向外部 plugin 服务","MPB-030：本地实现后移除对外部 plugin 的依赖配置",Phase4,未处理
 AntiHub-Backend\app\core\config.py,45,Settings.plugin_api_*,"Backend 配置项：plugin_api_base_url/plugin_api_admin_key/plugin_api_encryption_key 默认值与读取","MPB-030：移除 outbound plugin HTTP 后评估是否保留这些 settings；如仍需兼容期加密存量 key 则保留 encryption_key 并标注迁移期",待确认,未处理

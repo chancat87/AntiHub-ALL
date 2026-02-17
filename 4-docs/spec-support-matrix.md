@@ -126,13 +126,15 @@ $resp.Content.ReadAsStringAsync().Result
 
 ## 7. 常见坑（部署/联调）
 
-1) plugin 数据库用户
-- `AntiHub-plugin/schema.sql` 内存在对角色 `antigravity` 的引用。
-- 因此 `.env` 里 `PLUGIN_DB_USER` 建议使用 `antigravity`（不要和 `POSTGRES_USER` 复用同一个用户）。
+1) 已初始化过的 postgres volume（账号/密码/库名不一致）
+- PostgreSQL 官方镜像的 init 流程只会在“首次初始化数据目录”时执行；复用旧数据卷但重写了 `.env` 时，可能出现无法连接或库不存在。
+- 推荐先运行一次 DB 同步任务（不会清空数据）：
 
-2) 已初始化过的 postgres volume
-- 如果你之前用错误的 `PLUGIN_DB_USER` 初始化过数据卷，plugin 可能会卡在 schema 初始化。
-- 最简单的清理方式是重置 volume（会清空本地数据，仅用于开发联调环境）：
+```bash
+docker compose -f docker-compose.yml -f docker/docker-compose.db-init.yml run --rm db-init
+```
+
+- 如果你是开发联调环境，也可以直接重置 volume（会清空本地数据）：
 
 ```bash
 docker compose down -v

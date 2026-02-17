@@ -1,7 +1,7 @@
 services:
   # 一次性数据库初始化/同步任务：
   # - 解决 postgres 数据卷已存在时 initdb.d 不会再次执行的问题
-  # - 确保 plugin 数据库/用户/密码与 .env 保持一致
+  # - 确保 POSTGRES_USER/POSTGRES_DB 与 .env 保持一致（仅 Backend 单库）
   #
   # 使用方式（推荐 deploy.sh 自动执行）：
   #   docker compose -f docker-compose.yml -f docker/docker-compose.db-init.yml run --rm db-init
@@ -14,10 +14,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-antihub}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-please-change-me}
       POSTGRES_DB: ${POSTGRES_DB:-antihub}
-      PLUGIN_DB_NAME: ${PLUGIN_DB_NAME:-antigravity}
-      PLUGIN_DB_USER: ${PLUGIN_DB_USER:-antigravity}
-      PLUGIN_DB_PASSWORD: ${PLUGIN_DB_PASSWORD:-please-change-me}
     volumes:
-      - ./postgres/sync-plugin-db.sh:/sync-plugin-db.sh:ro
-    command: ["sh", "/sync-plugin-db.sh"]
+      - ./postgres/sync-db.sh:/sync-db.sh:ro
+    command: ["sh", "/sync-db.sh"]
     restart: "no"

@@ -76,7 +76,7 @@ chmod +x deploy.sh
 ./deploy.sh uninstall  # 3) 卸载（停止并删除容器，可选删除数据卷）
 ```
 
-如需手动同步（例如：复用旧数据卷但重写了 `.env` 密码；或迁移期需要初始化/同步旧 plugin DB）：
+如需手动同步（例如：复用旧数据卷但重写了 `.env` 密码，导致 PostgreSQL 账号/库信息不一致无法连接）：
 
 ```bash
 docker compose -f docker-compose.yml -f docker/docker-compose.db-init.yml run --rm db-init
