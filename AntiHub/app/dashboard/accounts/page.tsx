@@ -347,6 +347,19 @@ export default function AccountsPage() {
     return result;
   };
 
+  const getKiroDisplayName = (account: KiroAccount) => {
+    const name = (account.account_name || '').trim();
+    const email = (account.email || '').trim();
+    const isPlaceholderName =
+      !name ||
+      name === 'Kiro Account' ||
+      name === 'Kiro Builder ID' ||
+      name.startsWith('Kiro OAuth');
+
+    if (email && isPlaceholderName) return email;
+    return name || email || '未命名';
+  };
+
   const loadAccounts = async () => {
     try {
       // 加载反重力账号
@@ -2024,7 +2037,7 @@ export default function AccountsPage() {
                             {account.account_id}
                           </TableCell>
                           <TableCell>
-                            {account.account_name || account.email || '未命名'}
+                            {getKiroDisplayName(account)}
                           </TableCell>
                           <TableCell className="font-mono text-sm">
                             {kiroBalances[account.account_id] !== undefined

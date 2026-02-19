@@ -494,6 +494,21 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
     window.open(oauthUrl, '_blank', 'width=600,height=700');
   };
 
+  const tryWarmupKiroAccountInfo = async (accountId: string) => {
+    if (!accountId) return;
+    try {
+      await getKiroAccountBalance(accountId, { refresh: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '刷新账号信息失败（账号已添加）';
+      toasterRef.current?.show({
+        title: '同步账号信息失败',
+        message,
+        variant: 'warning',
+        position: 'top-right',
+      });
+    }
+  };
+
   // 开始倒计时（从获取链接时就开始）
   const startCountdownTimer = (initialSeconds: number) => {
     // 清除之前的定时器
@@ -610,6 +625,11 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
         setIsWaitingAuth(false);
 
         if (result.status === 'completed') {
+          const accountId = (result.data as any)?.account_id;
+          if (typeof accountId === 'string' && accountId.trim()) {
+            await tryWarmupKiroAccountInfo(accountId.trim());
+          }
+
           toasterRef.current?.show({
             title: '授权成功',
             message: 'Kiro 账号已成功添加',
@@ -827,11 +847,15 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
     }
 
     try {
-      await createKiroAccount({
+      const created = await createKiroAccount({
         refresh_token: refreshToken,
         auth_method: 'Social',
         is_shared: 0,
       });
+
+      if (created?.account_id) {
+        await tryWarmupKiroAccountInfo(created.account_id);
+      }
 
       toasterRef.current?.show({
         title: '添加成功',
@@ -976,7 +1000,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
         let available: number | undefined;
 
         try {
-          const balance = await getKiroAccountBalance(account.account_id);
+          const balance = await getKiroAccountBalance(account.account_id, { refresh: true });
           if (typeof balance.email === 'string' && balance.email.trim()) {
             email = balance.email.trim();
           }
@@ -1034,7 +1058,7 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
     }
 
     try {
-      await importKiroAwsIdcAccount({
+      const created = await importKiroAwsIdcAccount({
         refreshToken,
         clientId,
         clientSecret,
@@ -1042,6 +1066,10 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
         isShared: 0,
         region: region || undefined,
       });
+
+      if (created?.account_id) {
+        await tryWarmupKiroAccountInfo(created.account_id);
+      }
 
       toasterRef.current?.show({
         title: '导入成功',
@@ -1322,7 +1350,12 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
     }
   };
 
-  const handleFinishKiroAwsIdcDevice = () => {
+  const handleFinishKiroAwsIdcDevice = async () => {
+    const accountId = kiroAwsIdcResult?.account_id;
+    if (typeof accountId === 'string' && accountId.trim()) {
+      await tryWarmupKiroAccountInfo(accountId.trim());
+    }
+
     window.dispatchEvent(new CustomEvent('accountAdded'));
     onOpenChange(false);
     resetState();
@@ -4008,12 +4041,12 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
                   </StatefulButton>
                 ) : kiroAwsIdcMethod === 'device_code' ? (
                   kiroAwsIdcStatus === 'completed' ? (
-                    <Button
+                    <StatefulButton
                       onClick={handleFinishKiroAwsIdcDevice}
                       className="flex-1 cursor-pointer"
                     >
                       完成
-                    </Button>
+                    </StatefulButton>
                   ) : (
                     <Button
                       onClick={handleClose}
