@@ -1544,8 +1544,17 @@ export default function AccountsPage() {
     setDetailBalance(null);
 
     try {
-      const balanceData = await getKiroAccountBalance(account.account_id);
+      const balanceData = await getKiroAccountBalance(account.account_id, { refresh: true });
       setDetailBalance(balanceData);
+
+      if (balanceData.upstream_feedback?.raw || balanceData.upstream_feedback?.message) {
+        toasterRef.current?.show({
+          title: `Kiro接口反馈 (HTTP ${balanceData.upstream_feedback.status_code})`,
+          message: balanceData.upstream_feedback.raw || balanceData.upstream_feedback.message,
+          variant: 'warning',
+          position: 'top-right',
+        });
+      }
     } catch (err) {
       toasterRef.current?.show({
         title: '加载失败',
