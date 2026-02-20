@@ -437,12 +437,13 @@ async def update_account_name(
 )
 async def get_account_balance(
     account_id: str,
+    refresh: bool = Query(False, description="是否从 Kiro 官方刷新用量/额度（403 等失效账户会回退本地缓存）"),
     current_user: User = Depends(get_current_user),
     service: KiroService = Depends(get_kiro_service)
 ):
     """获取账号余额"""
     try:
-        result = await service.get_account_balance(current_user.id, account_id)
+        result = await service.get_account_balance(current_user.id, account_id, refresh=refresh)
         return result
     except UpstreamAPIError as e:
         return JSONResponse(

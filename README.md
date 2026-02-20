@@ -129,9 +129,9 @@ docker compose up -d
 
 ## 鸣谢
 
-- [Antigravity-Manager](https://github.com/lbjlaq/Antigravity-Manager) - 提供AN渠道的Token导入代码
-- [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) - 提供了AN渠道的429修复
-- [KiroGate](https://github.com/aliom-v/KiroGate) - Kiro渠道的Token导入、思考支持
-- [AIClient-2-API](https://github.com/justlovemaki/AIClient-2-API) - Kiro AWS IMA账户导入代码
-- [ZAI-TTS2API](https://github.com/aahl/zai-tts2api) - ZAI-TTS对接代码
-- [Kiro.rs](https://github.com/hank9999/kiro.rs) - CC2.1.19新字段解析方法代码
+- [Antigravity-Manager](https://github.com/lbjlaq/Antigravity-Manager)
+- [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
+- [KiroGate](https://github.com/aliom-v/KiroGate)
+- [AIClient-2-API](https://github.com/justlovemaki/AIClient-2-API)
+- [Kiro.rs](https://github.com/hank9999/kiro.rs)
+- [Kiro-account-manager](https://github.com/hj01857655/kiro-account-manager)

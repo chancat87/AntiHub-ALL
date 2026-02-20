@@ -80,9 +80,9 @@ if _CODEX_BASE_FOR_WHAM.endswith("/codex"):
 CODEX_WHAM_USAGE_URL = f"{_CODEX_BASE_FOR_WHAM}/wham/usage"
 # NOTE: Codex upstream appears to gate some model IDs by client version.
 # Keep this aligned with common working implementations (e.g. CLIProxyAPI).
-CODEX_DEFAULT_VERSION = "0.98.0"
+CODEX_DEFAULT_VERSION = "0.101.0"
 CODEX_OPENAI_BETA = "responses=experimental"
-CODEX_DEFAULT_USER_AGENT = "codex_cli_rs/0.98.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
+CODEX_DEFAULT_USER_AGENT = "codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
 CODEX_FALLBACK_PLATFORM = "CodexCLI"
 
 logger = logging.getLogger(__name__)
@@ -452,11 +452,22 @@ def _strip_codex_thinking_suffix(model_id: str) -> str:
     raw = (model_id or "").strip()
     if not raw:
         return ""
-    lowered = raw.lower()
-    for suffix in ("-none", "-low", "-medium", "-high", "-xhigh"):
-        if lowered.endswith(suffix):
-            return raw[: -len(suffix)]
-    return raw
+    # Some clients (esp. compact endpoints) may append additional suffixes like
+    # "-openai-compact" or "-high". Strip known suffixes iteratively.
+    suffixes = ("-openai-compact", "-none", "-low", "-medium", "-high", "-xhigh")
+
+    out = raw
+    while out:
+        lowered = out.lower()
+        matched = False
+        for suffix in suffixes:
+            if lowered.endswith(suffix):
+                out = out[: -len(suffix)]
+                matched = True
+                break
+        if not matched:
+            break
+    return out.strip()
 
 
 def _resolve_codex_model_name(model: Any) -> str:
@@ -842,9 +853,10 @@ def _normalize_codex_responses_compact_request(request_data: Dict[str, Any]) -> 
     """
     body = dict(request_data or {})
     body.pop("stream", None)
-    body["store"] = False
-    body["parallel_tool_calls"] = True
-    body["include"] = ["reasoning.encrypted_content"]
+    # NOTE: Codex upstream `/responses/compact` appears to be stricter than `/responses`
+    # and may reject `store` as an unknown parameter (400). We treat `store` as a
+    # compatibility-only field here and strip it before forwarding.
+    body.pop("store", None)
 
     # Keep consistent with SSE path: Codex upstream is strict about some sampling fields.
     body.pop("max_output_tokens", None)
@@ -1478,7 +1490,7 @@ class CodexService:
             return None
 
         url = _join_base_url(base_url, "/responses/compact")
-        body: Dict[str, Any] = dict(request_data or {})
+        body: Dict[str, Any] = _normalize_codex_responses_compact_request(request_data)
         if "model" in body:
             resolved = _resolve_codex_model_name(body.get("model"))
             if resolved:

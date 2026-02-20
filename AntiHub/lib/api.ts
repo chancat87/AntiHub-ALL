@@ -1727,6 +1727,12 @@ export interface KiroFreeTrialInfo {
   expiry: string;
 }
 
+export interface KiroUpstreamFeedback {
+  status_code: number;
+  message: string;
+  raw: string;
+}
+
 export interface KiroAccountBalance {
   account_id: string;
   account_name: string;
@@ -1743,6 +1749,7 @@ export interface KiroAccountBalance {
   };
   free_trial?: KiroFreeTrialInfo;
   bonus_details: KiroBonusDetail[];
+  upstream_feedback?: KiroUpstreamFeedback;
 }
 
 export interface KiroConsumptionLog {
@@ -1886,11 +1893,18 @@ export async function updateKiroAccountName(accountId: string, accountName: stri
 /**
  * 获取Kiro账号余额信息
  */
-export async function getKiroAccountBalance(accountId: string): Promise<KiroAccountBalance> {
-  const result = await fetchWithAuth<{ success: boolean; data: KiroAccountBalance }>(
-    `${API_BASE_URL}/api/kiro/accounts/${accountId}/balance`,
-    { method: 'GET' }
-  );
+export async function getKiroAccountBalance(
+  accountId: string,
+  options?: { refresh?: boolean }
+): Promise<KiroAccountBalance> {
+  const queryParams = new URLSearchParams();
+  if (options?.refresh) queryParams.append('refresh', '1');
+
+  const url = `${API_BASE_URL}/api/kiro/accounts/${accountId}/balance${
+    queryParams.toString() ? '?' + queryParams.toString() : ''
+  }`;
+
+  const result = await fetchWithAuth<{ success: boolean; data: KiroAccountBalance }>(url, { method: 'GET' });
   return result.data;
 }
 

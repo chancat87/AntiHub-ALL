@@ -74,6 +74,27 @@ def _to_ms(dt: Optional[datetime]) -> Optional[int]:
     return int(dt.timestamp() * 1000)
 
 
+def _epoch_to_datetime(value: Any) -> Optional[datetime]:
+    """
+    Convert upstream epoch timestamp (seconds or milliseconds) to UTC datetime.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        ts = float(value)
+    except Exception:
+        return None
+    if ts <= 0:
+        return None
+
+    # Epoch seconds in 2026 ~= 1.7e9. Anything far larger is very likely ms.
+    seconds = ts / 1000.0 if ts > 1e11 else ts
+    try:
+        return datetime.fromtimestamp(seconds, tz=timezone.utc)
+    except Exception:
+        return None
+
+
 def _safe_json_load(text_value: Optional[str]) -> Optional[Any]:
     if not isinstance(text_value, str):
         return None
@@ -166,6 +187,12 @@ class UpstreamAPIError(Exception):
             return self.upstream_response["message"]
         
         # 尝试从 detail 字段提取
+        # Some upstream errors use "reason" (e.g. banned / access denied hints)
+        if "reason" in self.upstream_response:
+            reason = self.upstream_response.get("reason")
+            if isinstance(reason, str) and reason.strip():
+                return reason.strip()
+
         if "detail" in self.upstream_response:
             return self.upstream_response["detail"]
         
@@ -708,17 +735,326 @@ class KiroService:
         assert updated is not None
         return {"success": True, "message": "账号名称已更新", "data": _account_to_safe_dict(updated)}
     
-    async def get_account_balance(self, user_id: int, account_id: str) -> Dict[str, Any]:
+    def _build_kiro_usage_limits_headers(self, *, token: str, machineid: str) -> Dict[str, str]:
+        """
+        Headers for getUsageLimits (CodeWhisperer runtime) requests.
+
+        Note: This is intentionally different from streaming chat headers.
+        """
+        ide_version = self._get_kiro_ide_version()
+        mid = (machineid or "")[:32] or secrets.token_hex(16)
+        user_agent = (
+            "aws-sdk-js/1.0.0 ua/2.1 os/win32#10.0.19044 lang/js md/nodejs#22.21.1 "
+            f"api/codewhispererruntime#1.0.0 m/E KiroIDE-{ide_version}-{mid}"
+        )
+        amz_user_agent = f"aws-sdk-js/1.0.0 KiroIDE-{ide_version}-{mid}"
+        return {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "User-Agent": user_agent,
+            "x-amz-user-agent": amz_user_agent,
+            "amz-sdk-invocation-id": str(uuid4()),
+            "amz-sdk-request": "attempt=1; max=1",
+            "Connection": "close",
+        }
+
+    @staticmethod
+    def _pick_usage_breakdown(value: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(value, list):
+            return None
+
+        # Prefer the requested resourceType if present.
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            rt = str(item.get("resourceType") or item.get("resource_type") or "").strip().upper()
+            if rt == "AGENTIC_REQUEST":
+                return item
+
+        for item in value:
+            if isinstance(item, dict):
+                return item
+        return None
+
+    @staticmethod
+    def _format_upstream_feedback(error: UpstreamAPIError) -> Dict[str, Any]:
+        raw: Optional[str] = None
+        if isinstance(error.upstream_response, dict):
+            raw_value = error.upstream_response.get("__raw") or error.upstream_response.get("raw")
+            if isinstance(raw_value, str) and raw_value.strip():
+                raw = raw_value.strip()
+            elif error.upstream_response:
+                try:
+                    raw = json.dumps(error.upstream_response, ensure_ascii=False)
+                except Exception:
+                    raw = None
+
+        text = raw or (error.extracted_message or error.message or "")
+        if isinstance(text, str) and len(text) > 2000:
+            text = text[:2000]
+
+        return {
+            "status_code": int(getattr(error, "status_code", 500) or 500),
+            "message": str(error.extracted_message or error.message or ""),
+            "raw": str(text or ""),
+        }
+
+    def _apply_usage_limits_payload_to_account(self, *, account: KiroAccount, payload: Dict[str, Any]) -> None:
+        user_info = payload.get("userInfo") or payload.get("user_info")
+        if isinstance(user_info, dict):
+            email = _trimmed_str(user_info.get("email"))
+            if email:
+                account.email = email
+            upstream_user_id = _trimmed_str(user_info.get("userId") or user_info.get("user_id"))
+            if upstream_user_id:
+                account.userid = upstream_user_id
+
+        subscription_info = payload.get("subscriptionInfo") or payload.get("subscription_info")
+        if isinstance(subscription_info, dict):
+            subscription_title = _trimmed_str(
+                subscription_info.get("subscriptionTitle") or subscription_info.get("subscription_title")
+            )
+            if subscription_title:
+                account.subscription = subscription_title
+            subscription_type = _trimmed_str(
+                subscription_info.get("type")
+                or subscription_info.get("subscriptionType")
+                or subscription_info.get("subscription_type")
+            )
+            if subscription_type:
+                account.subscription_type = subscription_type
+
+        breakdown_list = payload.get("usageBreakdownList") or payload.get("usage_breakdown_list") or []
+        breakdown = self._pick_usage_breakdown(breakdown_list) or {}
+
+        usage_limit = _coerce_float(
+            breakdown.get("usageLimitWithPrecision")
+            or breakdown.get("usage_limit_with_precision")
+            or breakdown.get("usageLimit")
+            or breakdown.get("usage_limit"),
+            0.0,
+        )
+        current_usage = _coerce_float(
+            breakdown.get("currentUsageWithPrecision")
+            or breakdown.get("current_usage_with_precision")
+            or breakdown.get("currentUsage")
+            or breakdown.get("current_usage"),
+            0.0,
+        )
+        account.usage_limit = float(usage_limit)
+        account.current_usage = float(current_usage)
+
+        reset_dt = _epoch_to_datetime(
+            breakdown.get("nextDateReset")
+            or breakdown.get("next_date_reset")
+            or payload.get("nextDateReset")
+            or payload.get("next_date_reset")
+        )
+        if reset_dt is not None:
+            account.reset_date = reset_dt
+
+        free_trial_info = breakdown.get("freeTrialInfo") or breakdown.get("free_trial_info")
+        if isinstance(free_trial_info, dict):
+            status_raw = free_trial_info.get("freeTrialStatus") or free_trial_info.get("free_trial_status")
+            status_text = str(status_raw or "").strip().upper()
+            ft_limit = _coerce_float(
+                free_trial_info.get("usageLimitWithPrecision")
+                or free_trial_info.get("usage_limit_with_precision")
+                or free_trial_info.get("usageLimit")
+                or free_trial_info.get("usage_limit"),
+                0.0,
+            )
+            ft_usage = _coerce_float(
+                free_trial_info.get("currentUsageWithPrecision")
+                or free_trial_info.get("current_usage_with_precision")
+                or free_trial_info.get("currentUsage")
+                or free_trial_info.get("current_usage"),
+                0.0,
+            )
+            ft_expiry = _epoch_to_datetime(
+                free_trial_info.get("freeTrialExpiry") or free_trial_info.get("free_trial_expiry")
+            )
+
+            if status_text or ft_limit or ft_usage or ft_expiry is not None:
+                account.free_trial_status = status_text == "ACTIVE"
+                account.free_trial_limit = float(ft_limit)
+                account.free_trial_usage = float(ft_usage)
+                account.free_trial_expiry = ft_expiry
+            else:
+                account.free_trial_status = None
+                account.free_trial_limit = None
+                account.free_trial_usage = None
+                account.free_trial_expiry = None
+        else:
+            account.free_trial_status = None
+            account.free_trial_limit = None
+            account.free_trial_usage = None
+            account.free_trial_expiry = None
+
+        bonuses = breakdown.get("bonuses")
+        bonus_details: List[Dict[str, Any]] = []
+        bonus_limit_total = 0.0
+        bonus_usage_total = 0.0
+
+        if isinstance(bonuses, list):
+            for bonus in bonuses:
+                if not isinstance(bonus, dict):
+                    continue
+
+                status = str(bonus.get("status") or "").strip().upper()
+                # Backward compat: missing status treated as active.
+                is_active = (not status) or status == "ACTIVE"
+
+                usage = _coerce_float(
+                    bonus.get("currentUsageWithPrecision")
+                    or bonus.get("current_usage_with_precision")
+                    or bonus.get("currentUsage")
+                    or bonus.get("current_usage"),
+                    0.0,
+                )
+                limit = _coerce_float(
+                    bonus.get("usageLimitWithPrecision")
+                    or bonus.get("usage_limit_with_precision")
+                    or bonus.get("usageLimit")
+                    or bonus.get("usage_limit"),
+                    0.0,
+                )
+
+                code = _trimmed_str(bonus.get("bonusCode") or bonus.get("bonus_code"))
+                name = _trimmed_str(bonus.get("displayName") or bonus.get("display_name") or bonus.get("name"))
+                description = bonus.get("description") if isinstance(bonus.get("description"), str) else None
+
+                expires_at = _epoch_to_datetime(bonus.get("expiresAt") or bonus.get("expires_at"))
+                redeemed_at = _epoch_to_datetime(bonus.get("redeemedAt") or bonus.get("redeemed_at"))
+
+                available = max(limit - usage, 0.0) if is_active else 0.0
+
+                bonus_details.append(
+                    {
+                        "type": "bonus",
+                        "name": name or code or "Bonus",
+                        "code": code,
+                        "description": description,
+                        "usage": float(usage),
+                        "limit": float(limit),
+                        "available": float(available),
+                        "status": status or ("ACTIVE" if is_active else ""),
+                        "expires_at": expires_at.isoformat() if expires_at else None,
+                        "redeemed_at": redeemed_at.isoformat() if redeemed_at else None,
+                    }
+                )
+
+                if is_active:
+                    bonus_limit_total += float(limit)
+                    bonus_usage_total += float(usage)
+
+        account.bonus_details = json.dumps(bonus_details, ensure_ascii=False) if bonus_details else None
+        account.bonus_limit = float(bonus_limit_total)
+        account.bonus_usage = float(bonus_usage_total)
+
+    async def _refresh_account_usage_limits_from_upstream(self, account: KiroAccount) -> Dict[str, Any]:
+        creds = self._load_account_credentials(account)
+        region = self._coerce_region(account.region or creds.get("region"))
+        machineid = _trimmed_str(account.machineid or creds.get("machineid")) or secrets.token_hex(32)
+        account.machineid = machineid
+
+        proxy_url = self._get_kiro_proxy_url()
+        timeout = httpx.Timeout(30.0, connect=10.0)
+        client_kwargs: Dict[str, Any] = {"timeout": timeout}
+        if proxy_url:
+            client_kwargs["proxies"] = proxy_url
+
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            access_token, profile_arn = await self._ensure_valid_access_token(client=client, account=account)
+
+            params: Dict[str, str] = {
+                "isEmailRequired": "true",
+                "origin": "AI_EDITOR",
+                "resourceType": "AGENTIC_REQUEST",
+            }
+            if profile_arn:
+                params["profileArn"] = profile_arn
+
+            headers_template = self._build_kiro_usage_limits_headers(token=access_token, machineid=machineid)
+
+            best_error: Optional[UpstreamAPIError] = None
+
+            for base_url in self._kiro_api_base_urls(region):
+                url = f"{base_url.rstrip('/')}/getUsageLimits"
+                host = httpx.URL(url).host
+                headers = dict(headers_template)
+                if host:
+                    headers["Host"] = host
+
+                try:
+                    resp = await client.get(url, headers=headers, params=params, timeout=timeout)
+                except (httpx.ConnectError, httpx.HTTPError) as e:
+                    best_error = best_error or UpstreamAPIError(status_code=502, message=str(e))
+                    continue
+
+                raw = (resp.text or "")[:4000]
+                try:
+                    payload: Any = resp.json() if resp.content else {}
+                except Exception:
+                    payload = {"__raw": raw}
+
+                if resp.status_code >= 400:
+                    upstream = payload if isinstance(payload, dict) else {"__raw": raw}
+                    if isinstance(upstream, dict):
+                        upstream.setdefault("__raw", raw)
+                    err = UpstreamAPIError(
+                        status_code=resp.status_code,
+                        message=raw or f"HTTP {resp.status_code}",
+                        upstream_response=upstream if isinstance(upstream, dict) else None,
+                    )
+
+                    if best_error is None:
+                        best_error = err
+                    else:
+                        # Prefer 403 (account banned/removed) over other errors for fallback handling.
+                        if err.status_code == 403 and best_error.status_code != 403:
+                            best_error = err
+                        elif err.status_code == 401 and best_error.status_code not in (403, 401):
+                            best_error = err
+                        elif best_error.status_code not in (403, 401):
+                            best_error = err
+                    continue
+
+                if not isinstance(payload, dict):
+                    raise UpstreamAPIError(
+                        status_code=502,
+                        message="getUsageLimits response is not a JSON object",
+                        upstream_response={"__raw": raw},
+                    )
+
+                self._apply_usage_limits_payload_to_account(account=account, payload=payload)
+                await self.db.flush()
+                return payload
+
+        raise best_error or UpstreamAPIError(status_code=502, message="getUsageLimits failed")
+
+    async def get_account_balance(self, user_id: int, account_id: str, refresh: bool = False) -> Dict[str, Any]:
         """获取 Kiro 账号余额（从 Backend DB 的缓存字段计算）。"""
         account = await self._get_account_by_id(account_id)
         account = self._assert_account_access(account, user_id)
+
+        upstream_feedback: Optional[Dict[str, Any]] = None
+        if refresh:
+            try:
+                await self._refresh_account_usage_limits_from_upstream(account)
+            except UpstreamAPIError as e:
+                # Only fallback to DB when upstream explicitly says access is gone (e.g. banned/removed).
+                if e.status_code == 403:
+                    upstream_feedback = self._format_upstream_feedback(e)
+                else:
+                    raise
 
         current_usage = _coerce_float(account.current_usage, 0.0)
         usage_limit = _coerce_float(account.usage_limit, 0.0)
         base_available = max(usage_limit - current_usage, 0.0)
 
         bonus_available = 0.0
-        bonus_limit_total = _coerce_float(account.bonus_limit, 0.0)
+        bonus_limit_total = 0.0
 
         bonus_details: List[Dict[str, Any]] = []
         parsed_bonus = _safe_json_load(account.bonus_details)
@@ -726,12 +1062,23 @@ class KiroService:
             for item in parsed_bonus:
                 if not isinstance(item, dict):
                     continue
+
+                status = str(item.get("status") or "").strip().upper()
+                # Backward compat: old rows had no status; treat as active.
+                is_active = (not status) or status == "ACTIVE"
+
                 usage = _coerce_float(item.get("usage"), 0.0)
                 limit = _coerce_float(item.get("limit"), 0.0)
-                bonus_available += max(limit - usage, 0.0)
+                available = _coerce_float(item.get("available"), max(limit - usage, 0.0))
+                if not is_active:
+                    available = 0.0
+
                 bonus_details.append(item)
-            bonus_limit_total = sum(_coerce_float(i.get("limit"), 0.0) for i in bonus_details)
+                if is_active:
+                    bonus_limit_total += float(limit)
+                    bonus_available += max(float(available), 0.0)
         else:
+            bonus_limit_total = _coerce_float(account.bonus_limit, 0.0)
             bonus_usage = _coerce_float(account.bonus_usage, 0.0)
             bonus_available = max(bonus_limit_total - bonus_usage, 0.0)
 
@@ -776,6 +1123,10 @@ class KiroService:
             "free_trial": free_trial,
             "bonus_details": bonus_details,
         }
+
+        if upstream_feedback:
+            data["upstream_feedback"] = upstream_feedback
+
         return {"success": True, "data": data}
     
     async def get_account_consumption(

@@ -964,16 +964,7 @@ async def responses_compact(
     endpoint = raw_request.url.path
     method = raw_request.method
     api_key_id = getattr(current_user, "_api_key_id", None)
-
-    try:
-        request_json = await raw_request.json()
-    except Exception:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON request body")
-
-    if not isinstance(request_json, dict):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Request body must be a JSON object")
-
-    model_name = request_json.get("model")
+    request_headers = raw_request.headers
 
     config_type = getattr(current_user, "_config_type", None)
     if config_type is None:
@@ -982,6 +973,49 @@ async def responses_compact(
             config_type = api_type
 
     effective_config_type = config_type or "antigravity"
+
+    try:
+        request_json = await raw_request.json()
+    except Exception:
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        await UsageLogService.record(
+            user_id=current_user.id,
+            api_key_id=api_key_id,
+            endpoint=endpoint,
+            method=method,
+            model_name=None,
+            config_type=effective_config_type,
+            stream=False,
+            success=False,
+            status_code=status.HTTP_400_BAD_REQUEST,
+            error_message="Invalid JSON request body",
+            duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
+            request_headers=request_headers,
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON request body")
+
+    if not isinstance(request_json, dict):
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        await UsageLogService.record(
+            user_id=current_user.id,
+            api_key_id=api_key_id,
+            endpoint=endpoint,
+            method=method,
+            model_name=None,
+            config_type=effective_config_type,
+            stream=False,
+            success=False,
+            status_code=status.HTTP_400_BAD_REQUEST,
+            error_message="Request body must be a JSON object",
+            duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
+            request_headers=request_headers,
+            request_body=request_json,
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Request body must be a JSON object")
+
+    model_name = request_json.get("model")
 
     try:
         ensure_spec_allowed("OAIResponses", effective_config_type)
@@ -1020,6 +1054,7 @@ async def responses_compact(
             status_code=200,
             duration_ms=duration_ms,
             client_app=raw_request.headers.get("X-App"),
+            request_headers=request_headers,
         )
 
         if any([in_tok, out_tok, total_tok, cached_tok]):
@@ -1052,6 +1087,8 @@ async def responses_compact(
             error_message=str(e.detail) if hasattr(e, "detail") else str(e),
             duration_ms=duration_ms,
             client_app=raw_request.headers.get("X-App"),
+            request_headers=request_headers,
+            request_body=request_json,
         )
         raise
     except UpstreamAPIError as e:
@@ -1069,6 +1106,8 @@ async def responses_compact(
             error_message=e.extracted_message,
             duration_ms=duration_ms,
             client_app=raw_request.headers.get("X-App"),
+            request_headers=request_headers,
+            request_body=request_json,
         )
         return JSONResponse(
             status_code=e.status_code,
@@ -1107,6 +1146,8 @@ async def responses_compact(
             error_message=error_message,
             duration_ms=duration_ms,
             client_app=raw_request.headers.get("X-App"),
+            request_headers=request_headers,
+            request_body=request_json,
         )
         return JSONResponse(status_code=e.response.status_code, content=upstream_response)
     except ValueError as e:
@@ -1124,6 +1165,8 @@ async def responses_compact(
             error_message=str(e),
             duration_ms=duration_ms,
             client_app=raw_request.headers.get("X-App"),
+            request_headers=request_headers,
+            request_body=request_json,
         )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
@@ -1141,6 +1184,8 @@ async def responses_compact(
             error_message=str(e),
             duration_ms=duration_ms,
             client_app=raw_request.headers.get("X-App"),
+            request_headers=request_headers,
+            request_body=request_json,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

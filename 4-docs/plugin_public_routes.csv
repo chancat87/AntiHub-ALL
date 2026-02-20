@@ -41,7 +41,7 @@
 "GET /api/kiro/accounts/{account_id}/credentials","导出 Kiro 凭证（敏感）","校验 Bearer sk-xxx；返回 refresh/access_token、machineid、profile_arn、client_secret 等，用于前端“复制凭证 JSON”；经后端 /api/kiro/accounts/{accountId}/credentials 转发"
 "PUT /api/kiro/accounts/{account_id}/status","启用/禁用 Kiro 账号","校验 Bearer sk-xxx；更新 kiro_accounts.status；前端通过后端 /api/kiro/accounts/{accountId}/status 调用"
 "PUT /api/kiro/accounts/{account_id}/name","修改 Kiro 账号名称","校验 Bearer sk-xxx；更新 kiro_accounts.account_name；前端通过后端 /api/kiro/accounts/{accountId}/name 调用"
-"GET /api/kiro/accounts/{account_id}/balance","刷新余额/使用量","校验 Bearer sk-xxx；必要时先 refresh token，再调用 usage limits 更新 current_usage/reset_date/bonus/free_trial 并计算可用额度；前端通过后端 /api/kiro/accounts/{accountId}/balance 调用"
+"GET /api/kiro/accounts/{account_id}/balance","刷新余额/使用量","校验 Bearer sk-xxx；默认仅用 DB 缓存字段计算余额；当传 ?refresh=1 时：必要时先 refresh token，再调用官方 getUsageLimits 更新 current_usage/reset_date/bonus/free_trial 并计算可用额度；若上游返回 403（账号失效/无权限），则回退 DB 并返回 upstream_feedback 原文供前端右上角提示"
 "DELETE /api/kiro/accounts/{account_id}","删除 Kiro 账号","校验 Bearer sk-xxx；删除 kiro_accounts；前端通过后端 /api/kiro/accounts/{accountId} (DELETE) 调用"
 "GET /api/kiro/accounts/{account_id}/consumption","获取 Kiro 消费记录","校验 Bearer sk-xxx；从 kiro_consumption_logs 拉用户消费并按账号过滤，可按日期筛；前端通过后端 /api/kiro/accounts/{accountId}/consumption 调用"
 "GET /api/kiro/consumption/stats","获取用户总消费统计","校验 Bearer sk-xxx；聚合当前用户所有 Kiro 账号的消费统计；前端通过后端 /api/kiro/consumption/stats 调用"
