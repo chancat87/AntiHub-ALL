@@ -613,6 +613,8 @@ class KiroService:
         if isinstance(expires_in_raw, (int, float)) and int(expires_in_raw) > 0:
             expires_in = int(expires_in_raw)
 
+        provider = _trimmed_str(account_data.get("provider")) or None
+
         credentials_payload = {
             "type": "kiro",
             "refresh_token": refresh_token,
@@ -630,6 +632,8 @@ class KiroService:
             "subscription": subscription,
             "subscription_type": subscription_type,
         }
+        if provider:
+            credentials_payload["provider"] = provider
         if expires_in is not None:
             credentials_payload["expires_in"] = expires_in
         encrypted_credentials = encrypt_api_key(json.dumps(credentials_payload, ensure_ascii=False))
@@ -857,6 +861,13 @@ class KiroService:
             )
             if subscription_type:
                 account.subscription_type = subscription_type
+
+            # Enterprise subscription auto-detection: if subscription title or
+            # type contains "POWER" or "ENTERPRISE", mark as Enterprise.
+            _sub_upper = (account.subscription or "").upper()
+            _type_upper = (account.subscription_type or "").upper()
+            if "POWER" in _sub_upper or "ENTERPRISE" in _sub_upper or "POWER" in _type_upper or "ENTERPRISE" in _type_upper:
+                account.subscription_type = "Enterprise"
 
         breakdown_list = payload.get("usageBreakdownList") or payload.get("usage_breakdown_list") or []
         breakdown = self._pick_usage_breakdown(breakdown_list) or {}
@@ -1708,8 +1719,9 @@ class KiroService:
                 resp = await client.post(url, json=payload, headers=headers, timeout=120.0)
                 if resp.status_code >= 400:
                     body = resp.text[:2000]
+                    context = f"auth_region={auth_region}, refresh_token_len={len(refresh_token)}"
                     account.need_refresh = True
-                    raise ValueError(f"IdC token refresh failed: HTTP {resp.status_code} {body}")
+                    raise ValueError(f"IdC token refresh failed: HTTP {resp.status_code} {body} ({context})")
                 data = resp.json()
                 if isinstance(data, dict):
                     new_token = _trimmed_str(data.get("accessToken") or data.get("access_token"))
@@ -1731,8 +1743,9 @@ class KiroService:
                 resp = await client.post(url, json=payload, headers=headers, timeout=120.0)
                 if resp.status_code >= 400:
                     body = resp.text[:2000]
+                    context = f"auth_region={auth_region}, refresh_token_len={len(refresh_token)}"
                     account.need_refresh = True
-                    raise ValueError(f"Social token refresh failed: HTTP {resp.status_code} {body}")
+                    raise ValueError(f"Social token refresh failed: HTTP {resp.status_code} {body} ({context})")
                 data = resp.json()
                 if isinstance(data, dict):
                     new_token = _trimmed_str(data.get("accessToken") or data.get("access_token"))
@@ -1800,6 +1813,7 @@ class KiroService:
         headers: Dict[str, str],
         payload: Dict[str, Any],
         model: str,
+        raise_on_auth_error: bool = False,
     ) -> AsyncIterator[bytes]:
         from app.utils.token_counter import count_tokens as _count_tokens
 
@@ -1943,6 +1957,12 @@ class KiroService:
             if resp.status_code >= 400:
                 raw = await resp.aread()
                 msg = raw.decode("utf-8", errors="replace")[:2000]
+                # Enterprise CBOR→REST fallback: raise on 401/403 so caller can retry
+                if raise_on_auth_error and resp.status_code in (401, 403):
+                    raise UpstreamAPIError(
+                        status_code=resp.status_code,
+                        message=msg or "Kiro upstream auth error",
+                    )
                 yield _openai_sse_error(msg or "Kiro upstream error", code=resp.status_code)
                 yield _openai_sse_done()
                 return
@@ -2234,19 +2254,33 @@ class KiroService:
                 headers = self._build_kiro_headers(token=access_token, machineid=machineid)
 
                 base_urls = self._kiro_api_base_urls(api_region)
+                is_enterprise = _trimmed_str(creds.get("provider")).lower() == "enterprise"
                 last_connect_error: Optional[str] = None
-                for base_url in base_urls:
+                for idx, base_url in enumerate(base_urls):
                     try:
+                        # For Enterprise accounts, enable raise_on_auth_error on non-last
+                        # URLs so that 401/403 from the CBOR endpoint (q.*) triggers a
+                        # fallback to the REST endpoint (codewhisperer.*).
+                        raise_flag = is_enterprise and idx < len(base_urls) - 1
                         async for chunk in self._stream_generate_assistant_response_as_openai(
                             client=client,
                             base_url=base_url,
                             headers=headers,
                             payload=payload,
                             model=requested_model,
+                            raise_on_auth_error=raise_flag,
                         ):
                             yield chunk
                         await self.db.flush()
                         return
+                    except UpstreamAPIError as e:
+                        # Enterprise CBOR→REST fallback: 401/403 from CBOR, try next URL
+                        logger.info(
+                            "Enterprise CBOR→REST fallback: %s returned %s, trying next URL",
+                            base_url, e.status_code,
+                        )
+                        last_connect_error = e.message
+                        continue
                     except httpx.ConnectError as e:
                         last_connect_error = str(e)
                         continue
