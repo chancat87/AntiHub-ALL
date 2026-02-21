@@ -11,6 +11,7 @@ provider="Enterprise" 字段与 Builder ID 区分。
 
 from __future__ import annotations
 
+import base64
 import re
 import secrets
 from typing import Any, Dict, Optional
@@ -35,6 +36,7 @@ router = APIRouter(prefix="/api/kiro/enterprise", tags=["Kiro Enterprise Account
 DEFAULT_AWS_REGION = "us-east-1"
 
 _AWS_REGION_RE = re.compile(r"^[a-z]{2}(?:-[a-z]+)+-\d+$")
+_AWS_REGION_SEARCH_RE = re.compile(r"[a-z]{2}(?:-[a-z]+)+-\d+")
 
 
 # ======== 工具函数 ========
@@ -60,6 +62,40 @@ def _get_first_value(data: Dict[str, Any], keys: list[str]) -> Optional[str]:
         value = data.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
+    return None
+
+
+def _decode_base64url(value: str) -> Optional[bytes]:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().replace("-", "+").replace("_", "/")
+    if not normalized:
+        return None
+    pad_len = (4 - (len(normalized) % 4)) % 4
+    try:
+        return base64.b64decode(normalized + ("=" * pad_len))
+    except Exception:
+        return None
+
+
+def _infer_auth_region_from_client_id(client_id: Optional[str]) -> Optional[str]:
+    """
+    Some exports omit region/authRegion, but AWS SSO OIDC clientId often embeds the auth region
+    (e.g. "eu-north-1") in its base64url payload. This helper attempts to infer it.
+    """
+
+    if not client_id:
+        return None
+    decoded = _decode_base64url(client_id)
+    if not decoded:
+        return None
+
+    text = decoded.decode("ascii", errors="ignore").lower()
+    candidates = _AWS_REGION_SEARCH_RE.findall(text)
+    for candidate in reversed(candidates):
+        candidate = candidate.strip()
+        if _AWS_REGION_RE.fullmatch(candidate):
+            return candidate
     return None
 
 
@@ -132,6 +168,24 @@ async def import_kiro_enterprise_credentials(
 
         region = _normalize_aws_region(creds["region"] or request.region)
 
+        auth_region: Optional[str] = None
+        if request.auth_region:
+            auth_region = _normalize_aws_region(request.auth_region)
+
+        api_region: Optional[str] = None
+        if request.api_region:
+            api_region = _normalize_aws_region(request.api_region)
+
+        # Heuristic: if region/auth_region is missing and we are still at the default,
+        # try to infer the true auth region from client_id (common for AWS IdC exports).
+        if not auth_region and region == DEFAULT_AWS_REGION:
+            inferred = _infer_auth_region_from_client_id(creds.get("client_id"))
+            if inferred and inferred != DEFAULT_AWS_REGION:
+                auth_region = inferred
+
+        # auth_region is used for OIDC token refresh endpoints.
+        effective_region = auth_region or region
+
         machineid = secrets.token_hex(32)
 
         account_data: Dict[str, Any] = {
@@ -142,9 +196,13 @@ async def import_kiro_enterprise_credentials(
             "client_id": creds["client_id"],
             "client_secret": creds["client_secret"],
             "machineid": machineid,
-            "region": region,
+            "region": effective_region,
             "is_shared": is_shared,
         }
+        if auth_region:
+            account_data["auth_region"] = auth_region
+        if api_region:
+            account_data["api_region"] = api_region
 
         return await service.create_account(current_user.id, account_data)
     except ValueError as e:
@@ -188,6 +246,31 @@ async def batch_import_kiro_enterprise_credentials(
             validate_required_credentials(creds)
 
             region = _normalize_aws_region(creds["region"] or request.region)
+
+            auth_region_raw = _get_first_value(
+                account_raw, ["auth_region", "authRegion", "sso_region", "ssoRegion", "oidc_region", "oidcRegion"]
+            )
+            if not auth_region_raw and request.auth_region:
+                auth_region_raw = request.auth_region
+
+            api_region_raw = _get_first_value(account_raw, ["api_region", "apiRegion"])
+            if not api_region_raw and request.api_region:
+                api_region_raw = request.api_region
+
+            auth_region: Optional[str] = None
+            if auth_region_raw:
+                auth_region = _normalize_aws_region(auth_region_raw)
+
+            api_region: Optional[str] = None
+            if api_region_raw:
+                api_region = _normalize_aws_region(api_region_raw)
+
+            if not auth_region and region == DEFAULT_AWS_REGION:
+                inferred = _infer_auth_region_from_client_id(creds.get("client_id"))
+                if inferred and inferred != DEFAULT_AWS_REGION:
+                    auth_region = inferred
+
+            effective_region = auth_region or region
             machineid = secrets.token_hex(32)
 
             account_name = (
@@ -203,9 +286,13 @@ async def batch_import_kiro_enterprise_credentials(
                 "client_id": creds["client_id"],
                 "client_secret": creds["client_secret"],
                 "machineid": machineid,
-                "region": region,
+                "region": effective_region,
                 "is_shared": is_shared,
             }
+            if auth_region:
+                account_data["auth_region"] = auth_region
+            if api_region:
+                account_data["api_region"] = api_region
 
             data = await service.create_account(current_user.id, account_data)
             results.append({"index": index, "success": True, "data": data})

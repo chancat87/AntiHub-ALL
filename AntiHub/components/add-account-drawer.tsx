@@ -1291,9 +1291,17 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
       const clientSecret = pickValue(obj, [
         'client_secret', 'clientSecret', 'csecret', 'client-secret',
       ]);
-      const region = pickValue(obj, [
-        'region', 'aws_region', 'awsRegion', 'region-id', 'region_id',
+      const authRegion = pickValue(obj, [
+        'auth_region',
+        'authRegion',
+        'sso_region',
+        'ssoRegion',
+        'oidc_region',
+        'oidcRegion',
       ]);
+      const apiRegion = pickValue(obj, ['api_region', 'apiRegion']);
+      const region = pickValue(obj, ['region', 'aws_region', 'awsRegion', 'region-id', 'region_id']);
+      const effectiveRegion = authRegion || region;
 
       if (!refreshToken || !clientId || !clientSecret) {
         failedCount++;
@@ -1311,7 +1319,9 @@ export function AddAccountDrawer({ open, onOpenChange, onSuccess }: AddAccountDr
           refreshToken,
           clientId,
           clientSecret,
-          region: region || 'us-east-1',
+          region: effectiveRegion || 'us-east-1',
+          authRegion: authRegion || undefined,
+          apiRegion: apiRegion || undefined,
           isShared: 0,
         });
 

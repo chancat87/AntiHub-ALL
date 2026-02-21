@@ -2076,6 +2076,8 @@ export async function importKiroEnterpriseAccount(payload: {
   clientId: string;
   clientSecret: string;
   region?: string;
+  authRegion?: string;
+  apiRegion?: string;
   accountName?: string;
   isShared?: number;
 }): Promise<KiroAccount> {
@@ -2088,6 +2090,8 @@ export async function importKiroEnterpriseAccount(payload: {
         client_id: payload.clientId,
         client_secret: payload.clientSecret,
         region: payload.region ?? 'us-east-1',
+        auth_region: payload.authRegion,
+        api_region: payload.apiRegion,
         account_name: payload.accountName,
         is_shared: payload.isShared ?? 0,
       }),
@@ -2102,6 +2106,8 @@ export async function importKiroEnterpriseAccount(payload: {
 export async function batchImportKiroEnterpriseAccounts(payload: {
   accounts: Array<Record<string, any>>;
   region?: string;
+  authRegion?: string;
+  apiRegion?: string;
   isShared?: number;
 }): Promise<{ results: Array<{ index: number; success: boolean; data?: KiroAccount; error?: string }> }> {
   return fetchWithAuth<{ results: Array<{ index: number; success: boolean; data?: KiroAccount; error?: string }> }>(
@@ -2111,6 +2117,8 @@ export async function batchImportKiroEnterpriseAccounts(payload: {
       body: JSON.stringify({
         accounts: payload.accounts,
         region: payload.region ?? 'us-east-1',
+        auth_region: payload.authRegion,
+        api_region: payload.apiRegion,
         is_shared: payload.isShared ?? 0,
       }),
     }

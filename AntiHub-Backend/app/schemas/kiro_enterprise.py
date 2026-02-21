@@ -22,21 +22,33 @@ class KiroEnterpriseImportRequest(BaseModel):
     """
 
     refresh_token: str = Field(
-        ..., description="OIDC refresh token"
+        ..., alias="refreshToken", description="OIDC refresh token"
     )
     client_id: str = Field(
-        ..., description="OIDC client ID"
+        ..., alias="clientId", description="OIDC client ID"
     )
     client_secret: str = Field(
-        ..., description="OIDC client secret"
+        ..., alias="clientSecret", description="OIDC client secret"
     )
     region: Optional[str] = Field(
         "us-east-1", description="AWS 区域ID（例如 us-east-1），不传则默认 us-east-1"
     )
-    account_name: Optional[str] = Field(
-        None, description="账号显示名称（可选，不传则后端使用默认值）"
+    auth_region: Optional[str] = Field(
+        None,
+        alias="authRegion",
+        description="Auth Region（用于 OIDC Token 刷新）；未指定时回退到 region。",
     )
-    is_shared: int = Field(0, description="0=私有账号，1=共享账号")
+    api_region: Optional[str] = Field(
+        None,
+        alias="apiRegion",
+        description="API Region（用于 q.* / codewhisperer.* API 请求）；未指定时 IdC 默认 us-east-1。",
+    )
+    account_name: Optional[str] = Field(
+        None, alias="accountName", description="账号显示名称（可选，不传则后端使用默认值）"
+    )
+    is_shared: int = Field(0, alias="isShared", description="0=私有账号，1=共享账号")
+
+    model_config = {"populate_by_name": True}
 
 
 class KiroEnterpriseBatchImportRequest(BaseModel):
@@ -53,4 +65,16 @@ class KiroEnterpriseBatchImportRequest(BaseModel):
     region: Optional[str] = Field(
         "us-east-1", description="全局默认 AWS 区域ID，单个账户未指定时使用此值"
     )
+    auth_region: Optional[str] = Field(
+        None,
+        alias="authRegion",
+        description="全局默认 Auth Region（用于 Token 刷新）；单个账户未指定时使用此值。",
+    )
+    api_region: Optional[str] = Field(
+        None,
+        alias="apiRegion",
+        description="全局默认 API Region（用于 API 请求）；单个账户未指定时使用此值。",
+    )
     is_shared: int = Field(0, description="0=私有账号，1=共享账号")
+
+    model_config = {"populate_by_name": True}
