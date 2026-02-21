@@ -2422,6 +2422,14 @@ export async function refreshCodexAccount(accountId: number): Promise<CodexAccou
   return result.data;
 }
 
+export async function refreshCodexAccountQuota(accountId: number): Promise<CodexAccount> {
+  const result = await fetchWithAuth<{ success: boolean; data: CodexAccount }>(
+    `${API_BASE_URL}/api/codex/accounts/${accountId}/refresh-quota`,
+    { method: 'POST' }
+  );
+  return result.data;
+}
+
 export interface CodexWhamUsageWindow {
   used_percent: number | null;
   limit_window_seconds: number | null;
