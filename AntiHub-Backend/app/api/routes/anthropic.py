@@ -9,6 +9,7 @@ import logging
 import json
 import os
 import tempfile
+import time
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Header
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -22,6 +23,7 @@ from app.services.plugin_api_service import PluginAPIService
 from app.services.kiro_service import KiroService
 from app.services.qwen_api_service import QwenAPIService
 from app.services.anthropic_adapter import AnthropicAdapter
+from app.services.usage_log_service import UsageLogService, SSEUsageTracker
 from app.services.kiro_anthropic_converter import KiroAnthropicConverter
 from app.utils.kiro_converters import is_thinking_enabled
 from app.schemas.anthropic import (
@@ -118,6 +120,19 @@ async def _create_message_impl(
     buffer_for_claude_code=True 时，会缓冲 SSE 直到拿到真实 usage，
     再把 tokens 写入 message_start（用于 Claude Code 2.1.9+ 上下文压缩逻辑）。
     """
+    start_time = time.monotonic()
+    method = raw_request.method
+    api_key_id = getattr(current_user, "_api_key_id", None)
+    model_name = getattr(request, "model", None)
+
+    try:
+        request_dump = request.model_dump()
+    except Exception:
+        request_dump = {}
+
+    config_type = None
+    effective_config_type = "antigravity"
+
     try:
         if not anthropic_version:
             anthropic_version = "2023-06-01"
@@ -131,6 +146,7 @@ async def _create_message_impl(
         # 如果是 API key 模式（有 _config_type），按 Spec 白名单拦截（避免非白名单悄悄走 plug-in 默认通道）。
         if isinstance(config_type, str) and config_type.strip():
             config_type = config_type.strip().lower()
+            effective_config_type = config_type or "antigravity"
             ensure_spec_allowed("Claude", config_type)
         else:
             config_type = None
@@ -140,11 +156,29 @@ async def _create_message_impl(
             if api_type in ["kiro", "antigravity", "qwen"]:
                 config_type = api_type
 
+            effective_config_type = config_type or "antigravity"
         use_kiro = config_type == "kiro"
 
         if use_kiro:
             # 检查beta权限
             if current_user.beta != 1:
+                duration_ms = int((time.monotonic() - start_time) * 1000)
+                await UsageLogService.record(
+                    user_id=current_user.id,
+                    api_key_id=api_key_id,
+                    endpoint=endpoint,
+                    method=method,
+                    model_name=model_name,
+                    config_type="kiro",
+                    stream=bool(request.stream),
+                    success=False,
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    error_message="Kiro配置仅对beta计划用户开放",
+                    duration_ms=duration_ms,
+                    client_app=raw_request.headers.get("X-App"),
+                    request_headers=raw_request.headers,
+                    request_body=request_dump,
+                )
                 error_response = AnthropicAdapter.create_error_response(
                     error_type="permission_error",
                     message="Kiro配置仅对beta计划用户开放",
@@ -185,7 +219,11 @@ async def _create_message_impl(
             except Exception:
                 estimated_input_tokens = 0
 
+            tracker = SSEUsageTracker()
+
             async def generate():
+                local_error_message: Optional[str] = None
+                local_status_code: Optional[int] = status.HTTP_200_OK
                 try:
                     if use_kiro:
                         # 使用Kiro服务
@@ -205,6 +243,14 @@ async def _create_message_impl(
                             request_data=upstream_request,
                         )
 
+                    async def tracked_openai_stream():
+                        async for chunk in openai_stream:
+                            if isinstance(chunk, (bytes, bytearray)):
+                                tracker.feed(bytes(chunk))
+                            else:
+                                tracker.feed(str(chunk).encode("utf-8", errors="replace"))
+                            yield chunk
+
                     # 转换流式响应为Anthropic格式
                     converter = (
                         AnthropicAdapter.convert_openai_stream_to_anthropic_cc
@@ -213,7 +259,7 @@ async def _create_message_impl(
                     )
 
                     async for event in converter(
-                        openai_stream,
+                        tracked_openai_stream(),
                         model=request.model,
                         request_id=request_id,
                         estimated_input_tokens=estimated_input_tokens,
@@ -223,6 +269,8 @@ async def _create_message_impl(
 
                 except Exception as e:
                     logger.error(f"流式响应错误: {str(e)}")
+                    local_error_message = str(e)
+                    local_status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
                     error_event = {
                         "type": "error",
                         "error": {
@@ -231,6 +279,32 @@ async def _create_message_impl(
                         },
                     }
                     yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
+                finally:
+                    tracker.finalize()
+                    duration_ms = int((time.monotonic() - start_time) * 1000)
+                    final_success = bool(tracker.success) and local_error_message is None
+                    final_status_code = tracker.status_code or local_status_code
+                    final_error_message = tracker.error_message or local_error_message
+                    await UsageLogService.record(
+                        user_id=current_user.id,
+                        api_key_id=api_key_id,
+                        endpoint=endpoint,
+                        method=method,
+                        model_name=model_name,
+                        config_type=effective_config_type,
+                        stream=True,
+                        input_tokens=tracker.input_tokens,
+                        output_tokens=tracker.output_tokens,
+                        cached_tokens=tracker.cached_tokens,
+                        total_tokens=tracker.total_tokens,
+                        success=final_success,
+                        status_code=final_status_code,
+                        error_message=final_error_message,
+                        duration_ms=duration_ms,
+                        client_app=raw_request.headers.get("X-App"),
+                        request_headers=raw_request.headers,
+                        request_body=request_dump,
+                    )
 
             # 构建响应头
             response_headers = {
@@ -270,16 +344,86 @@ async def _create_message_impl(
                 request_data=upstream_request,
             )
 
+        tracker = SSEUsageTracker()
+
+        async def tracked_openai_stream():
+            async for chunk in openai_stream:
+                if isinstance(chunk, (bytes, bytearray)):
+                    tracker.feed(bytes(chunk))
+                else:
+                    tracker.feed(str(chunk).encode("utf-8", errors="replace"))
+                yield chunk
+
         # 收集流式响应并转换为完整的OpenAI响应
         openai_response = await AnthropicAdapter.collect_openai_stream_to_response(
-            openai_stream,
+            tracked_openai_stream(),
             thinking_enabled=thinking_enabled,
         )
+        tracker.finalize()
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+
+        # 上游在 stream 里用 `data: {"error": ...}` 传错；非流式模式下必须识别出来，否则调用方会收到空响应。
+        if not tracker.success:
+            code = tracker.status_code or status.HTTP_502_BAD_GATEWAY
+            error_message = tracker.error_message or "upstream_error"
+            await UsageLogService.record(
+                user_id=current_user.id,
+                api_key_id=api_key_id,
+                endpoint=endpoint,
+                method=method,
+                model_name=model_name,
+                config_type=effective_config_type,
+                stream=False,
+                input_tokens=tracker.input_tokens,
+                output_tokens=tracker.output_tokens,
+                cached_tokens=tracker.cached_tokens,
+                total_tokens=tracker.total_tokens,
+                success=False,
+                status_code=code,
+                error_message=error_message,
+                duration_ms=duration_ms,
+                client_app=raw_request.headers.get("X-App"),
+                request_headers=raw_request.headers,
+                request_body=request_dump,
+            )
+
+            error_response = AnthropicAdapter.create_error_response(
+                error_type="api_error",
+                message=error_message,
+            )
+            response = JSONResponse(
+                status_code=code,
+                content=error_response.model_dump(),
+                headers={"anthropic-version": anthropic_version},
+            )
+            if anthropic_beta:
+                response.headers["anthropic-beta"] = anthropic_beta
+            return response
 
         # 转换响应为Anthropic格式
         anthropic_response = AnthropicAdapter.openai_to_anthropic_response(
             openai_response,
             model=request.model,
+        )
+
+        await UsageLogService.record(
+            user_id=current_user.id,
+            api_key_id=api_key_id,
+            endpoint=endpoint,
+            method=method,
+            model_name=model_name,
+            config_type=effective_config_type,
+            stream=False,
+            input_tokens=tracker.input_tokens,
+            output_tokens=tracker.output_tokens,
+            cached_tokens=tracker.cached_tokens,
+            total_tokens=tracker.total_tokens,
+            success=True,
+            status_code=status.HTTP_200_OK,
+            duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
+            request_headers=raw_request.headers,
+            request_body=request_dump,
         )
 
         # 构建响应，添加必需的头
@@ -296,10 +440,44 @@ async def _create_message_impl(
 
         return response
 
-    except HTTPException:
+    except HTTPException as e:
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        await UsageLogService.record(
+            user_id=current_user.id,
+            api_key_id=api_key_id,
+            endpoint=endpoint,
+            method=method,
+            model_name=model_name,
+            config_type=effective_config_type,
+            stream=bool(request.stream),
+            success=False,
+            status_code=e.status_code,
+            error_message=str(getattr(e, "detail", None) or str(e)),
+            duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
+            request_headers=raw_request.headers,
+            request_body=request_dump,
+        )
         raise
     except ValueError as e:
         logger.error(f"请求验证错误: {str(e)}")
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        await UsageLogService.record(
+            user_id=current_user.id,
+            api_key_id=api_key_id,
+            endpoint=endpoint,
+            method=method,
+            model_name=model_name,
+            config_type=effective_config_type,
+            stream=bool(request.stream),
+            success=False,
+            status_code=status.HTTP_400_BAD_REQUEST,
+            error_message=str(e),
+            duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
+            request_headers=raw_request.headers,
+            request_body=request_dump,
+        )
 
         # Dump错误信息
         dump_error_to_file(
@@ -322,6 +500,23 @@ async def _create_message_impl(
         )
     except Exception as e:
         logger.error(f"消息创建失败: {str(e)}")
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        await UsageLogService.record(
+            user_id=current_user.id,
+            api_key_id=api_key_id,
+            endpoint=endpoint,
+            method=method,
+            model_name=model_name,
+            config_type=effective_config_type,
+            stream=bool(request.stream),
+            success=False,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            error_message=str(e),
+            duration_ms=duration_ms,
+            client_app=raw_request.headers.get("X-App"),
+            request_headers=raw_request.headers,
+            request_body=request_dump,
+        )
 
         # 尝试获取上游错误信息
         upstream_error = None

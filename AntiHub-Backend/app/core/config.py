@@ -25,6 +25,12 @@ class Settings(BaseSettings):
         default=False,
         description="是否打印用户请求体（谨慎开启，可能包含敏感信息）",
     )
+
+    # Usage logs（消耗日志/请求日志）
+    usage_log_redact_headers: bool = Field(
+        default=True,
+        description="是否在保存消耗日志时对敏感请求头做脱敏处理（Authorization/Cookie/Token 等）",
+    )
     
     # 数据库配置
     database_url: str = Field(..., description="PostgreSQL 数据库连接 URL")
