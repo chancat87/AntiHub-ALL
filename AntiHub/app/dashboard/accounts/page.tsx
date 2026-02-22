@@ -30,6 +30,7 @@ import {
   updateCodexAccountStatus,
   updateCodexAccountName,
   refreshCodexAccount,
+  refreshCodexAccountQuota,
   getCodexWhamUsage,
   getUiDefaultChannels,
   getGeminiCLIAccounts,
@@ -1457,6 +1458,49 @@ export default function AccountsPage() {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : '刷新账号信息失败';
+      const isUpstreamNetworkError =
+        message.includes('ConnectTimeout') ||
+        message.includes('ConnectError') ||
+        message.includes('ReadTimeout') ||
+        message.includes('上游请求异常') ||
+        message.includes('请检查网络/代理');
+
+      // wham/usage / responses 可能需要容器出站网络；如果仅因网络问题失败，则尽量退化为只刷新剩余额度
+      if (isUpstreamNetworkError) {
+        try {
+          console.warn('[Codex] 刷新官方额度/限额失败，尝试退化为仅刷新剩余额度:', accountId, message);
+          const updated = await refreshCodexAccountQuota(accountId);
+          setCodexAccounts((prev) => prev.map((a) => (a.account_id === accountId ? { ...a, ...updated } : a)));
+          setDetailCodexAccount((prev) => (prev && prev.account_id === accountId ? { ...prev, ...updated } : prev));
+          setCodexWhamAccount((prev) => (prev && prev.account_id === accountId ? { ...prev, ...updated } : prev));
+          setCodexRefreshErrorById((prev) => {
+            if (!(accountId in prev)) return prev;
+            const next = { ...prev };
+            delete next[accountId];
+            return next;
+          });
+
+          toasterRef.current?.show({
+            title: '部分刷新成功',
+            message: '限额刷新失败，已仅刷新剩余额度',
+            variant: 'warning',
+            position: 'top-right',
+          });
+          return;
+        } catch (quotaErr) {
+          const quotaMessage = quotaErr instanceof Error ? quotaErr.message : '刷新剩余额度失败';
+          const combined = `官方刷新失败：${message}；备用刷新失败：${quotaMessage}`;
+          setCodexRefreshErrorById((prev) => ({ ...prev, [accountId]: combined }));
+          toasterRef.current?.show({
+            title: '刷新失败',
+            message: combined,
+            variant: 'error',
+            position: 'top-right',
+          });
+          return;
+        }
+      }
+
       setCodexRefreshErrorById((prev) => ({ ...prev, [accountId]: message }));
       toasterRef.current?.show({
         title: '刷新失败',
@@ -1491,7 +1535,7 @@ export default function AccountsPage() {
         setRefreshingCodexAccountId(accountId);
 
         try {
-          const updated = await refreshCodexAccount(accountId);
+          const updated = await refreshCodexAccountQuota(accountId);
           okCount += 1;
           setCodexAccounts((prev) => prev.map((a) => (a.account_id === accountId ? { ...a, ...updated } : a)));
           setDetailCodexAccount((prev) => (prev && prev.account_id === accountId ? { ...prev, ...updated } : prev));

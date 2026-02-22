@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from sqlalchemy import delete, select
 
+from app.core.config import get_settings
 from app.db.session import get_session_maker
 from app.models.usage_log import UsageLog
 from app.repositories.usage_counter_repository import UsageCounterRepository
@@ -85,7 +86,7 @@ def _is_sensitive_header(key: str) -> bool:
 
 def _truncate_request_headers(headers: Any) -> Optional[str]:
     """
-    将请求头写入为 JSON 字符串（脱敏 + 截断 + 限量），用于调试展示。
+    将请求头写入为 JSON 字符串（可选脱敏 + 截断 + 限量），用于调试展示。
     注意：这里保存的是“进入本系统”的请求头（raw_request.headers）。
     """
     if headers is None:
@@ -96,6 +97,12 @@ def _truncate_request_headers(headers: Any) -> Optional[str]:
     except Exception:
         return None
 
+    redact_sensitive_headers = True
+    try:
+        redact_sensitive_headers = bool(get_settings().usage_log_redact_headers)
+    except Exception:
+        redact_sensitive_headers = True
+
     sanitized: Dict[str, str] = {}
     try:
         for key, value in items:
@@ -103,7 +110,7 @@ def _truncate_request_headers(headers: Any) -> Optional[str]:
                 continue
             k = str(key)
             v = "" if value is None else str(value)
-            if _is_sensitive_header(k):
+            if redact_sensitive_headers and _is_sensitive_header(k):
                 sanitized[k] = "[REDACTED]"
             elif len(v) > MAX_SINGLE_HEADER_VALUE_LENGTH:
                 sanitized[k] = v[:MAX_SINGLE_HEADER_VALUE_LENGTH] + "…"

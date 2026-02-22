@@ -15,6 +15,7 @@ services:
       APP_ENV: production
       LOG_LEVEL: INFO
       DEBUG_LOG: ${DEBUG_LOG:-false}
+      USAGE_LOG_REDACT_HEADERS: ${USAGE_LOG_REDACT_HEADERS:-true}
 
       # 数据库（用户自行外接）
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@db:5432/antihub}

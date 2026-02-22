@@ -2159,6 +2159,49 @@ class CodexService:
             except Exception:
                 pass
 
+    async def refresh_account_quota_official(self, user_id: int, account_id: int) -> Dict[str, Any]:
+        """
+        仅刷新“剩余额度”（quota_remaining / quota_currency / quota_updated_at）。
+
+        说明：
+        - 不触发 wham/usage 或 responses ping（避免额外上游请求与风控）
+        - 适配前端“刷新全部剩余额度”的批量刷新按钮
+        """
+        account = await self.repo.get_by_id_and_user_id(account_id, user_id)
+        if not account:
+            raise ValueError("账号不存在")
+
+        try:
+            creds = self._load_account_credentials(account)
+        except Exception as e:
+            logger.error(
+                "codex refresh-quota: failed to load account credentials (decrypt/parse): user_id=%s account_id=%s",
+                user_id,
+                account_id,
+                exc_info=True,
+            )
+            raise ValueError("账号凭证解析失败：请检查后端加密密钥是否变更，必要时重新导入该账号") from e
+
+        creds = await self._ensure_account_tokens(account, creds)
+        access_token = _safe_str(creds.get("access_token"))
+        if not access_token:
+            raise ValueError("账号缺少 access_token")
+
+        quota = await self._fetch_official_quota(access_token)
+        if quota is None:
+            raise ValueError("无法获取官方剩余额度（可能是账号无 Billing 权限或接口不可用）")
+
+        remaining, currency = quota
+        now = _now_utc()
+        account.quota_remaining = remaining
+        account.quota_currency = currency
+        account.quota_updated_at = now
+        await self.db.flush()
+        await self.db.commit()
+
+        updated = await self.repo.get_by_id_and_user_id(account_id, user_id)
+        return {"success": True, "data": updated or account}
+
     async def refresh_account_official(self, user_id: int, account_id: int) -> Dict[str, Any]:
         """
         从“官方上游”刷新并落库（尽量做到）：
