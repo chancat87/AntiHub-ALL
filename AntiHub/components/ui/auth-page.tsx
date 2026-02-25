@@ -60,17 +60,23 @@ export function AuthPage() {
 	const handlePasswordLogin = async (e: React.FormEvent) => {
 		e.preventDefault();
 		setError('');
+
+		if (password.length < 6) {
+			setError('密码至少需要 6 位');
+			return;
+		}
+
 		setIsLoading(true);
 
-    try {
-      await login({ username, password });
-      navigateToDashboard();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '登录失败，请稍后重试');
-    } finally {
-      setIsLoading(false);
-    }
-  };
+		try {
+			await login({ username, password });
+			navigateToDashboard();
+		} catch (err) {
+			setError(err instanceof Error ? err.message : '登录失败，请稍后重试');
+		} finally {
+			setIsLoading(false);
+		}
+	};
 
 	return (
 		<main className="relative md:h-screen md:overflow-hidden lg:grid lg:grid-cols-2 bg-black">
@@ -152,6 +158,7 @@ export function AuthPage() {
 								placeholder="密码"
 								className="bg-white/5 border-white/10 text-white placeholder:text-white/40"
 								type="password"
+								minLength={6}
 						value={password}
 						onChange={(e) => setPassword(e.target.value)}
 						required

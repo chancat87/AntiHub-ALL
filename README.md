@@ -79,6 +79,15 @@ openssl rand -base64 32  # 用于 JWT_SECRET_KEY
 - `JWT_SECRET_KEY` - JWT 令牌签名密钥
 - `PLUGIN_API_ENCRYPTION_KEY` - Fernet 加密密钥（用于加密存储用户 API 密钥）
 
+登录/访问方式相关（很容易踩坑）：
+- `ADMIN_USERNAME` / `ADMIN_PASSWORD`：首次启动会按此自动创建管理员账号；`ADMIN_PASSWORD` **至少 6 位**（否则会触发后端参数校验失败，前端无法登录）。
+- `COOKIE_HTTP`：
+  - 如果你是 **域名 + HTTPS**（反向代理/Caddy/Nginx）：保持 `COOKIE_HTTP=HTTPS`。
+  - 如果你是 **IP 直连 + HTTP**（内网/测试）：设置 `COOKIE_HTTP=HTTP`，否则浏览器不会写入登录 cookie（Secure）。
+- 反向代理必须配置 `/backend` 转发到后端（否则前端会出现 404/接口不可用）：
+  - `/` -> `http://127.0.0.1:<WEB_PORT>`（默认 `3000`）
+  - `/backend` -> `http://127.0.0.1:<BACKEND_PORT>`（默认 `8000`）
+
 2) 启动：
 
 ```bash

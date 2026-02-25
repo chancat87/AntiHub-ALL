@@ -72,6 +72,7 @@ read_with_default() {
 # 读取密码（明文输入一次）
 read_password() {
     local prompt="$1"
+    local min_length="${2:-1}"
     local password
 
     while true; do
@@ -80,6 +81,10 @@ read_password() {
         password=${password//$'\r'/}
         if [ -z "$password" ]; then
             log_error "密码不能为空"
+            continue
+        fi
+        if [ "${#password}" -lt "$min_length" ]; then
+            log_error "密码长度至少 ${min_length} 位"
             continue
         fi
         echo "$password"
@@ -112,6 +117,9 @@ write_env_file() {
                 ;;
             \#\ POSTGRES_PORT=*|\#POSTGRES_PORT=*|POSTGRES_PORT=*)
                 printf '%s\n' "POSTGRES_PORT=$POSTGRES_PORT"
+                ;;
+            COOKIE_HTTP=*)
+                printf '%s\n' "COOKIE_HTTP=$COOKIE_HTTP"
                 ;;
             ADMIN_USERNAME=*)
                 printf '%s\n' "ADMIN_USERNAME=$ADMIN_USERNAME"
@@ -150,6 +158,27 @@ get_env_value() {
     value=$(grep -m 1 "^${key}=" "$file" 2>/dev/null | cut -d'=' -f2- || true)
     value=${value//$'\r'/}
     printf '%s' "$value"
+}
+
+validate_admin_password() {
+    local env_file="$1"
+    local min_length="${2:-6}"
+
+    local admin_password
+    admin_password=$(get_env_value "$env_file" "ADMIN_PASSWORD")
+
+    # 允许留空：留空表示不初始化管理员账号（适用于仅 OAuth 登录场景）
+    if [ -z "$admin_password" ]; then
+        return 0
+    fi
+
+    if [ "${#admin_password}" -lt "$min_length" ]; then
+        log_error "ADMIN_PASSWORD 长度至少 ${min_length} 位（当前 ${#admin_password} 位），否则后端会报参数校验错误/无法登录"
+        log_error "请修改 ${env_file} 中的 ADMIN_PASSWORD 后重试"
+        return 1
+    fi
+
+    return 0
 }
 
 # 修复 docker 目录权限（解决 NAS 等环境下的权限问题）
@@ -272,16 +301,55 @@ deploy() {
         echo "  PostgreSQL: $POSTGRES_PORT (127.0.0.1:$POSTGRES_PORT)"
         echo ""
 
-        # 3.2 配置管理员账户
+        # 3.2 访问方式（影响登录 Cookie 的 Secure 属性）
+        log_info "=== 访问方式（影响登录 Cookie） ==="
+        echo "请选择你准备如何访问前端："
+        echo "  1) 域名 + HTTPS（推荐，Cookie 将带 Secure）"
+        echo "  2) IP 直连 + HTTP（测试/内网，Cookie 不带 Secure）"
+
+        COOKIE_HTTP="HTTPS"
+        DOMAIN_NAME=""
+        while true; do
+            read -p "请选择 [1-2] (默认 1): " access_choice
+            access_choice=${access_choice//$'\r'/}
+            access_choice=${access_choice:-1}
+
+            case "$access_choice" in
+                1)
+                    COOKIE_HTTP="HTTPS"
+                    read -p "域名（可选，仅用于部署完成后的提示输出；留空跳过）: " DOMAIN_NAME
+                    DOMAIN_NAME=${DOMAIN_NAME//$'\r'/}
+                    ;;
+                2)
+                    COOKIE_HTTP="HTTP"
+                    DOMAIN_NAME=""
+                    ;;
+                *)
+                    log_warn "无效选择，请输入 1 或 2"
+                    continue
+                    ;;
+            esac
+
+            break
+        done
+
+        echo ""
+        log_info "访问方式配置完成：COOKIE_HTTP=$COOKIE_HTTP"
+        if [ -n "$DOMAIN_NAME" ]; then
+            echo "  域名: $DOMAIN_NAME"
+        fi
+        echo ""
+
+        # 3.3 配置管理员账户
         log_info "=== 管理员账户配置 ==="
         ADMIN_USERNAME=$(read_with_default "管理员用户名" "admin")
-        log_prompt "设置管理员密码"
-        ADMIN_PASSWORD=$(read_password "管理员密码")
+        log_prompt "设置管理员密码（至少 6 位，否则无法登录）"
+        ADMIN_PASSWORD=$(read_password "管理员密码" 6)
         echo ""
         log_info "管理员账户配置完成"
         echo ""
 
-        # 3.3 生成密钥
+        # 3.4 生成密钥
         log_info "生成安全密钥..."
         OLD_JWT_SECRET=$(get_env_value "$ENV_BACKUP_FILE" "JWT_SECRET_KEY")
         OLD_POSTGRES_PASSWORD=$(get_env_value "$ENV_BACKUP_FILE" "POSTGRES_PASSWORD")
@@ -306,13 +374,16 @@ deploy() {
             ENCRYPTION_KEY=$(generate_fernet_key)
         fi
 
-        # 3.4 替换 .env 中的占位符（兼容 Linux 和 macOS）
+        # 3.5 替换 .env 中的占位符（兼容 Linux 和 macOS）
         log_info "写入配置文件..."
         write_env_file ".env"
 
         log_info "环境变量配置已生成"
         echo ""
     fi
+
+    # 3.6 校验关键配置（避免启动后才发现登录/校验错误）
+    validate_admin_password ".env" 6
 
     # 4. 拉取镜像
     log_info "拉取 Docker 镜像..."
@@ -390,14 +461,32 @@ EOSQL
     POSTGRES_DB=${POSTGRES_DB//$'\r'/}
     ADMIN_USERNAME=$(grep "^ADMIN_USERNAME=" .env | cut -d'=' -f2 || echo "admin")
     ADMIN_PASSWORD=$(grep "^ADMIN_PASSWORD=" .env | cut -d'=' -f2-)
+    COOKIE_HTTP=$(grep "^COOKIE_HTTP=" .env | cut -d'=' -f2 || echo "HTTPS")
+    COOKIE_HTTP=${COOKIE_HTTP//$'\r'/}
+    COOKIE_HTTP_UPPER=$(echo "$COOKIE_HTTP" | tr '[:lower:]' '[:upper:]')
 
     # 获取服务器 IP
     SERVER_IP=$(hostname -I | awk '{print $1}' || echo "YOUR_SERVER_IP")
 
     log_info "访问地址："
-    echo "  前端（对外）: http://${SERVER_IP}:${WEB_PORT}"
-    echo "  前端（本地）: http://localhost:${WEB_PORT}"
-    echo "  后端（仅本地）: http://localhost:${BACKEND_PORT}"
+    if [ "$COOKIE_HTTP_UPPER" = "HTTPS" ]; then
+        if [ -n "$DOMAIN_NAME" ]; then
+            echo "  前端（HTTPS）: https://${DOMAIN_NAME}"
+        else
+            echo "  前端（HTTPS）: https://<your-domain>"
+        fi
+        echo "  Web 上游（给反代用）: http://127.0.0.1:${WEB_PORT}"
+    else
+        echo "  前端（对外）: http://${SERVER_IP}:${WEB_PORT}"
+        echo "  前端（本地）: http://localhost:${WEB_PORT}"
+    fi
+    echo "  后端（仅本地）: http://127.0.0.1:${BACKEND_PORT}"
+    echo "  Cookie 模式: ${COOKIE_HTTP_UPPER}（HTTP=不加 Secure；HTTPS=加 Secure）"
+    echo ""
+    log_info "反向代理提示（必读）："
+    echo "  需要把 /backend 转发到后端，否则前端请求会 404"
+    echo "  /        -> http://127.0.0.1:${WEB_PORT}"
+    echo "  /backend -> http://127.0.0.1:${BACKEND_PORT}"
     echo ""
     log_info "管理员账号："
     echo "  用户名: ${ADMIN_USERNAME}"
@@ -417,7 +506,8 @@ EOSQL
     echo "  1. 请妥善保管 .env 文件中的密钥"
     echo "  2. Web 端口已对外暴露，建议配置防火墙"
     echo "  3. Backend 和数据库仅本地访问（127.0.0.1）"
-    echo "  4. 生产环境建议配置反向代理（Nginx/Caddy）并启用 HTTPS"
+    echo "  4. 反向代理需要配置 /backend -> http://127.0.0.1:${BACKEND_PORT}"
+    echo "  5. 用 IP 直连 HTTP 时设置 COOKIE_HTTP=HTTP；用域名 HTTPS 时保持 COOKIE_HTTP=HTTPS"
     echo ""
 }
 
@@ -433,6 +523,8 @@ upgrade() {
         deploy
         return 0
     fi
+
+    validate_admin_password ".env" 6
 
     # 备份 .env，避免误改或回滚困难
     ENV_BACKUP_FILE=".env.bak.upgrade.$(date +\"%Y%m%d_%H%M%S\")"

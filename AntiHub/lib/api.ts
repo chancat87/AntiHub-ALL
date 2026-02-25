@@ -91,6 +91,7 @@ async function handleResponse<T>(response: Response): Promise<T> {
     
     let errorMessage: string;
     const detail = errorBody?.detail;
+    const details = errorBody?.details;
     if (typeof detail === 'string') {
       errorMessage = detail;
     } else if (Array.isArray(detail)) {
@@ -98,6 +99,31 @@ async function handleResponse<T>(response: Response): Promise<T> {
     } else if (detail && typeof detail === 'object') {
       // 处理对象类型的 detail，例如 {error: "message"}
       errorMessage = detail.error || detail.message || JSON.stringify(detail);
+    } else if (Array.isArray(details)) {
+      // Backend 统一错误结构：{ error_code, message, details: [...] }
+      const normalized = details
+        .map((e: any) => {
+          const msg = typeof e?.msg === 'string' ? e.msg : null;
+          const loc = Array.isArray(e?.loc)
+            ? e.loc
+                .filter((l: any) => l !== 'body')
+                .map((l: any) => String(l))
+                .join('.')
+            : null;
+
+          if (msg && loc) return `${loc}: ${msg}`;
+          return msg;
+        })
+        .filter(Boolean);
+
+      if (normalized.length > 0) {
+        const prefix = typeof errorBody?.message === 'string' ? errorBody.message : null;
+        errorMessage = prefix ? `${prefix}: ${normalized.join(', ')}` : normalized.join(', ');
+      } else if (typeof errorBody?.message === 'string') {
+        errorMessage = errorBody.message;
+      } else {
+        errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+      }
     } else if (typeof errorBody?.error === 'string') {
       errorMessage = errorBody.error;
     } else if (typeof errorBody?.message === 'string') {
