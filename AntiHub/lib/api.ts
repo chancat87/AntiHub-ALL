@@ -2154,6 +2154,71 @@ export async function batchImportKiroEnterpriseAccounts(payload: {
   );
 }
 
+// ==================== Kiro External IdP 相关 API ====================
+
+/**
+ * 导入 Kiro External IdP 账户
+ */
+export async function importKiroExternalIdpAccount(payload: {
+  refreshToken: string;
+  clientId: string;
+  tokenEndpoint: string;
+  issuerUrl?: string;
+  scopes?: string;
+  clientSecret?: string;
+  region?: string;
+  accountName?: string;
+  isShared?: number;
+  ssoClientId?: string;
+  ssoClientSecret?: string;
+  ssoRefreshToken?: string;
+  ssoStartUrl?: string;
+}): Promise<KiroAccount> {
+  const result = await fetchWithAuth<{ success: boolean; data: KiroAccount }>(
+    `${API_BASE_URL}/api/kiro/external-idp/import`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        refresh_token: payload.refreshToken,
+        client_id: payload.clientId,
+        token_endpoint: payload.tokenEndpoint,
+        issuer_url: payload.issuerUrl,
+        scopes: payload.scopes,
+        client_secret: payload.clientSecret,
+        region: payload.region ?? 'us-east-1',
+        account_name: payload.accountName,
+        is_shared: payload.isShared ?? 0,
+        sso_client_id: payload.ssoClientId,
+        sso_client_secret: payload.ssoClientSecret,
+        sso_refresh_token: payload.ssoRefreshToken,
+        sso_start_url: payload.ssoStartUrl,
+      }),
+    }
+  );
+  return result.data;
+}
+
+/**
+ * 批量导入 Kiro External IdP 账户
+ */
+export async function batchImportKiroExternalIdpAccounts(payload: {
+  accounts: Array<Record<string, any>>;
+  region?: string;
+  isShared?: number;
+}): Promise<{ results: Array<{ index: number; success: boolean; data?: KiroAccount; error?: string }> }> {
+  return fetchWithAuth<{ results: Array<{ index: number; success: boolean; data?: KiroAccount; error?: string }> }>(
+    `${API_BASE_URL}/api/kiro/external-idp/batch-import`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        accounts: payload.accounts,
+        region: payload.region ?? 'us-east-1',
+        is_shared: payload.isShared ?? 0,
+      }),
+    }
+  );
+}
+
 // ==================== Qwen 账号管理相关 API ====================
 
 /**
